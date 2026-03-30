@@ -46,6 +46,15 @@ const awardBadges = (user, action) => {
 }
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const getFrontendBaseUrl = () => {
+  const base = process.env.FRONTEND_URL || 'https://collab-frontend-five.vercel.app'
+  return base.replace(/\/$/, '')
+}
+
+const buildVerifyLink = (email) => {
+  const base = getFrontendBaseUrl()
+  return `${base}/verify-email?email=${encodeURIComponent(email)}`
+}
 
 exports.register = async (req, res) => {
   try {
@@ -80,6 +89,33 @@ exports.register = async (req, res) => {
 
     const existingUser = await User.findOne({ email: email.toLowerCase().trim() })
     if (existingUser) {
+      if (!existingUser.emailVerified) {
+        const otp = Math.floor(100000 + Math.random() * 900000).toString()
+        const expires = new Date(Date.now() + 15 * 60 * 1000)
+        const verifyLink = buildVerifyLink(existingUser.email)
+
+        existingUser.emailVerificationOTP = otp
+        existingUser.emailVerificationExpires = expires
+        await existingUser.save()
+
+        try {
+          await sendEmail({
+            to: existingUser.email,
+            subject: 'Email Verification OTP',
+            text: `Your email verification OTP is ${otp}. It expires in 15 minutes. Verify here: ${verifyLink}`,
+            html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in 15 minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
+          })
+        } catch (mailError) {
+          return res.status(500).json({ message: 'Failed to resend verification email. Please try again.' })
+        }
+
+        return res.status(200).json({
+          message: 'Email already registered but not verified. OTP resent.',
+          email: existingUser.email,
+          requiresVerification: true
+        })
+      }
+
       return res.status(409).json({ message: 'Email already registered' })
     }
 
@@ -127,6 +163,7 @@ exports.register = async (req, res) => {
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString()
     const expires = new Date(Date.now() + 15 * 60 * 1000)
+    const verifyLink = buildVerifyLink(email.toLowerCase().trim())
 
     const normalizedSkills = Array.isArray(skills) ? skills : (skills ? [skills] : [])
 
@@ -153,8 +190,8 @@ exports.register = async (req, res) => {
       await sendEmail({
         to: user.email,
         subject: 'Email Verification OTP',
-        text: `Your email verification OTP is ${otp}. It expires in 15 minutes.`,
-        html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in 15 minutes.</p>`
+        text: `Your email verification OTP is ${otp}. It expires in 15 minutes. Verify here: ${verifyLink}`,
+        html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in 15 minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
       })
     } catch (mailError) {
       await User.deleteOne({ _id: user._id })
