@@ -1,3 +1,5 @@
+const fs = require('fs')
+const path = require('path')
 const Project = require('../models/Project')
 const User = require('../models/User')
 const { createNotification } = require('./notificationController')
@@ -901,6 +903,68 @@ exports.addProjectFile = async (req, res) => {
   } catch (error) {
     console.error('Upload file error:', error)
     res.status(500).json({ message: 'Failed to upload file' })
+  }
+}
+
+exports.deleteProjectFile = async (req, res) => {
+  try {
+    const { id, fileId } = req.params
+    const userId = req.user.userId
+
+    const project = await Project.findById(id)
+    if (!project) {
+      return res.status(404).json({ message: 'Project not found' })
+    }
+
+    const userIdString = userId.toString()
+    const team = (project.teamMembers || []).map((uid) => uid.toString())
+    const isOwner = project.owner.toString() === userIdString
+
+    if (!isOwner && !team.includes(userIdString)) {
+      return res.status(403).json({ message: 'Only team members can remove files' })
+    }
+
+    const fileIndex = (project.files || []).findIndex(
+      (file) => file._id?.toString() === fileId || file.filename === fileId
+    )
+
+    if (fileIndex === -1) {
+      return res.status(404).json({ message: 'File not found' })
+    }
+
+    const file = project.files[fileIndex]
+    const uploaderId = file.uploadedBy?.toString()
+    if (!isOwner && uploaderId !== userIdString) {
+      return res.status(403).json({ message: 'You can only remove files you uploaded' })
+    }
+
+    project.files.splice(fileIndex, 1)
+
+    if (project.validation?.sharedFiles?.length) {
+      project.validation.sharedFiles = project.validation.sharedFiles.filter(
+        (shared) => shared.filename !== file.filename && shared._id?.toString() !== fileId
+      )
+    }
+
+    project.buildPhase.lastActivity = new Date()
+    await project.save()
+
+    const filePath = path.join(__dirname, '..', 'uploads', file.filename)
+    fs.unlink(filePath, () => {})
+
+    const populated = await Project.findById(project._id)
+      .populate('owner', 'name email')
+      .populate('teamMembers', 'name email')
+      .populate('interestedUsers', 'name email')
+      .populate('messages.sender', 'name email')
+      .populate('files.uploadedBy', 'name email')
+      .populate('validation.sharedFiles.uploadedBy', 'name email')
+      .populate('validation.reviews.reviewer', 'name')
+
+    res.json({ message: 'File removed', project: populated })
+  } catch (error) {
+    console.error('Delete file error:', error)
+    res.status(500).json({ message: 'Failed to remove file' })
   }
 }
 

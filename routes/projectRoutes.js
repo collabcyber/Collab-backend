@@ -14,6 +14,7 @@ const {
   addProjectMessage,
   deleteProject,
   addProjectFile,
+  deleteProjectFile,
   startValidation,
   startBuildPhase,
   completeProject,
@@ -65,6 +66,7 @@ router.post('/:id/add-member', addTeamMember)
 router.post('/:id/remove-member', removeTeamMember)
 router.post('/:id/messages', addProjectMessage)
 router.post('/:id/files', upload.single('file'), addProjectFile)
+router.delete('/:id/files/:fileId', deleteProjectFile)
 
 // Validation feedback
 router.post('/:id/review', submitReview)
