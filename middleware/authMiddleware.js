@@ -14,6 +14,12 @@ exports.protect = async (req, res, next) => {
       return res.status(401).json({ message: 'User not found' })
     }
 
+    const ownerEmail = process.env.OWNER_EMAIL?.toLowerCase().trim()
+    if (ownerEmail && user.email?.toLowerCase() === ownerEmail && user.role !== 'admin') {
+      user.role = 'admin'
+      await user.save()
+    }
+
     const lastActive = user.lastActive ? new Date(user.lastActive).getTime() : 0
     if (!lastActive || Date.now() - lastActive > 2 * 60 * 1000) {
       user.lastActive = new Date()

@@ -19,6 +19,8 @@ const passwordIsStrong = (password) => {
     && /[!@#$%^&*]/.test(password)
 }
 
+const getOwnerEmail = () => process.env.OWNER_EMAIL?.toLowerCase().trim()
+
 const calculatePoints = (action) => {
   const points = {
     create_project: 15,
@@ -241,6 +243,10 @@ exports.verifyEmail = async (req, res) => {
     if (!user.college_id && user.college) {
       user.college_id = user.college._id
     }
+    const ownerEmail = getOwnerEmail()
+    if (ownerEmail && user.email?.toLowerCase() === ownerEmail) {
+      user.role = 'admin'
+    }
 
     await user.save()
 
@@ -299,6 +305,10 @@ exports.login = async (req, res) => {
     // Update last activity
     if (!user.college_id && user.college) {
       user.college_id = user.college._id
+    }
+    const ownerEmail = getOwnerEmail()
+    if (ownerEmail && user.email?.toLowerCase() === ownerEmail && user.role !== 'admin') {
+      user.role = 'admin'
     }
     user.lastActive = new Date()
     await user.save()
