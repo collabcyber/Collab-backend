@@ -5,13 +5,15 @@ exports.getNotifications = async (req, res) => {
   try {
     const userId = req.user.userId
     const { page = 1, limit = 20 } = req.query
+    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
 
     const notifications = await Notification.find({ recipient: userId })
       .populate('relatedUser', 'name')
       .populate('relatedProject', 'title')
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
+      .limit(parsedLimit)
+      .skip((parsedPage - 1) * parsedLimit)
 
     const total = await Notification.countDocuments({ recipient: userId })
     const unreadCount = await Notification.countDocuments({ recipient: userId, isRead: false })
@@ -20,10 +22,10 @@ exports.getNotifications = async (req, res) => {
       notifications,
       unreadCount,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: parsedPage,
+        limit: parsedLimit,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / parsedLimit)
       }
     })
   } catch (error) {

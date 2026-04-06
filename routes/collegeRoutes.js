@@ -1,10 +1,16 @@
 const express = require('express')
 const router = express.Router()
 const { seedColleges, getAllColleges, searchColleges } = require('../services/collegeService')
+const { z } = require('zod')
+const validate = require('../middleware/validate')
+const { emptyBody } = require('../validators')
 
 // Seed colleges (for initial setup)
 router.post('/seed', async (req, res) => {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({ message: 'Seeding is disabled in production' })
+    }
     await seedColleges()
     res.json({ message: 'Colleges seeded successfully' })
   } catch (error) {
@@ -14,7 +20,7 @@ router.post('/seed', async (req, res) => {
 })
 
 // Get all colleges (default)
-router.get('/', async (req, res) => {
+router.get('/', validate(emptyBody), async (req, res) => {
   try {
     const colleges = await getAllColleges()
     res.json(colleges)
@@ -25,7 +31,7 @@ router.get('/', async (req, res) => {
 })
 
 // Get all colleges for dropdown
-router.get('/all', async (req, res) => {
+router.get('/all', validate(emptyBody), async (req, res) => {
   try {
     const colleges = await getAllColleges()
     res.json(colleges)
@@ -36,7 +42,7 @@ router.get('/all', async (req, res) => {
 })
 
 // Search colleges
-router.get('/search/:query', async (req, res) => {
+router.get('/search/:query', validate(z.object({ params: z.object({ query: z.string().min(1) }) })), async (req, res) => {
   try {
     const { query } = req.params
     if (!query) {

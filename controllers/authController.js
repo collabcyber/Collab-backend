@@ -5,6 +5,16 @@ const jwtConfig = require('../config/jwt')
 const bcrypt = require('bcryptjs')
 const mongoose = require('mongoose')
 const { sendEmail } = require('../services/emailService')
+const { setAuthCookie, clearAuthCookie } = require('../utils/authCookies')
+const {
+  OTP_EXPIRY_MINUTES,
+  OTP_ATTEMPT_LIMIT,
+  OTP_RESEND_COOLDOWN_SECONDS,
+  generateOtp,
+  hashOtp,
+  isOtpExpired,
+  canResendOtp
+} = require('../utils/otp')
 
 const emailIsValid = (email) => {
   const re = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
@@ -92,20 +102,28 @@ exports.register = async (req, res) => {
     const existingUser = await User.findOne({ email: email.toLowerCase().trim() })
     if (existingUser) {
       if (!existingUser.emailVerified) {
-        const otp = Math.floor(100000 + Math.random() * 900000).toString()
-        const expires = new Date(Date.now() + 15 * 60 * 1000)
+        if (!canResendOtp(existingUser.emailVerificationLastSent)) {
+          const waitSeconds = OTP_RESEND_COOLDOWN_SECONDS
+          return res.status(429).json({ message: `Please wait ${waitSeconds}s before requesting another OTP.` })
+        }
+
+        const otp = generateOtp()
+        const expires = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
         const verifyLink = buildVerifyLink(existingUser.email)
 
-        existingUser.emailVerificationOTP = otp
+        existingUser.emailVerificationOTP = undefined
+        existingUser.emailVerificationOTPHash = hashOtp(otp)
+        existingUser.emailVerificationOTPAttempts = 0
         existingUser.emailVerificationExpires = expires
+        existingUser.emailVerificationLastSent = new Date()
         await existingUser.save()
 
         try {
           await sendEmail({
             to: existingUser.email,
             subject: 'Email Verification OTP',
-            text: `Your email verification OTP is ${otp}. It expires in 15 minutes. Verify here: ${verifyLink}`,
-            html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in 15 minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
+            text: `Your email verification OTP is ${otp}. It expires in ${OTP_EXPIRY_MINUTES} minutes. Verify here: ${verifyLink}`,
+            html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in ${OTP_EXPIRY_MINUTES} minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
           })
         } catch (mailError) {
           return res.status(500).json({ message: 'Failed to resend verification email. Please try again.' })
@@ -163,8 +181,8 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'College selection is required' })
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString()
-    const expires = new Date(Date.now() + 15 * 60 * 1000)
+    const otp = generateOtp()
+    const expires = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
     const verifyLink = buildVerifyLink(email.toLowerCase().trim())
 
     const normalizedSkills = Array.isArray(skills) ? skills : (skills ? [skills] : [])
@@ -182,7 +200,10 @@ exports.register = async (req, res) => {
       primaryCategory: primaryCategory || '',
       phone: phone ? phone.toString().trim() : '',
       emailVerified: false,
-      emailVerificationOTP: otp,
+      emailVerificationOTP: undefined,
+      emailVerificationOTPHash: hashOtp(otp),
+      emailVerificationOTPAttempts: 0,
+      emailVerificationLastSent: new Date(),
       emailVerificationExpires: expires
     })
 
@@ -192,8 +213,8 @@ exports.register = async (req, res) => {
       await sendEmail({
         to: user.email,
         subject: 'Email Verification OTP',
-        text: `Your email verification OTP is ${otp}. It expires in 15 minutes. Verify here: ${verifyLink}`,
-        html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in 15 minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
+        text: `Your email verification OTP is ${otp}. It expires in ${OTP_EXPIRY_MINUTES} minutes. Verify here: ${verifyLink}`,
+        html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in ${OTP_EXPIRY_MINUTES} minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
       })
     } catch (mailError) {
       await User.deleteOne({ _id: user._id })
@@ -220,7 +241,9 @@ exports.verifyEmail = async (req, res) => {
       return res.status(400).json({ message: 'Email and OTP are required' })
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).populate('college')
+    const user = await User.findOne({ email: email.toLowerCase().trim() })
+      .select('+password')
+      .populate('college')
     if (!user) {
       return res.status(404).json({ message: 'User not found' })
     }
@@ -229,16 +252,41 @@ exports.verifyEmail = async (req, res) => {
       return res.status(400).json({ message: 'Email already verified' })
     }
 
-    if (user.emailVerificationOTP !== otp) {
+    if ((user.emailVerificationOTPAttempts || 0) >= OTP_ATTEMPT_LIMIT) {
+      return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
+    }
+
+    const providedHash = hashOtp(String(otp))
+    const storedHash = user.emailVerificationOTPHash
+    const legacyOtp = user.emailVerificationOTP
+    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === otp
+
+    if (!isMatch) {
+      user.emailVerificationOTPAttempts = (user.emailVerificationOTPAttempts || 0) + 1
+      await user.save()
+      if (user.emailVerificationOTPAttempts >= OTP_ATTEMPT_LIMIT) {
+        user.emailVerificationOTP = undefined
+        user.emailVerificationOTPHash = undefined
+        user.emailVerificationExpires = undefined
+        await user.save()
+        return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
+      }
       return res.status(400).json({ message: 'Invalid OTP' })
     }
 
-    if (!user.emailVerificationExpires || user.emailVerificationExpires < new Date()) {
+    if (isOtpExpired(user.emailVerificationExpires)) {
+      user.emailVerificationOTP = undefined
+      user.emailVerificationOTPHash = undefined
+      user.emailVerificationExpires = undefined
+      await user.save()
       return res.status(400).json({ message: 'OTP expired' })
     }
 
     user.emailVerified = true
     user.emailVerificationOTP = undefined
+    user.emailVerificationOTPHash = undefined
+    user.emailVerificationOTPAttempts = 0
+    user.emailVerificationLastSent = undefined
     user.emailVerificationExpires = undefined
     if (!user.college_id && user.college) {
       user.college_id = user.college._id
@@ -250,10 +298,14 @@ exports.verifyEmail = async (req, res) => {
 
     await user.save()
 
-    const token = generateToken({ userId: user._id, email: user.email }, process.env.JWT_SECRET, jwtConfig)
+    const token = generateToken(
+      { userId: user._id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: jwtConfig.accessExpiresIn }
+    )
+    setAuthCookie(res, token)
 
     res.json({
-      token,
       user: {
         id: user._id,
         name: user.name,
@@ -288,7 +340,9 @@ exports.login = async (req, res) => {
       return res.status(400).json({ message: 'Enter a valid email' })
     }
 
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).populate('college')
+    const user = await User.findOne({ email: email.toLowerCase().trim() })
+      .select('+emailVerificationOTP +emailVerificationOTPHash +emailVerificationOTPAttempts')
+      .populate('college')
     if (!user) {
       return res.status(401).json({ message: 'Invalid email or password' })
     }
@@ -313,10 +367,14 @@ exports.login = async (req, res) => {
     user.lastActive = new Date()
     await user.save()
 
-    const token = generateToken({ userId: user._id, email: user.email }, process.env.JWT_SECRET, jwtConfig)
+    const token = generateToken(
+      { userId: user._id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: jwtConfig.accessExpiresIn }
+    )
+    setAuthCookie(res, token)
 
     res.status(200).json({
-      token,
       user: {
         id: user._id,
         name: user.name,
@@ -346,14 +404,23 @@ exports.forgotPassword = async (req, res) => {
     }
 
     const user = await User.findOne({ email: email.toLowerCase().trim() })
+      .select('+resetPasswordOTP +resetPasswordOTPHash +resetPasswordOTPAttempts')
     if (!user) {
       return res.status(404).json({ message: 'No account found for that email' })
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString()
-    const expires = new Date(Date.now() + 15 * 60 * 1000)
+    if (!canResendOtp(user.resetPasswordLastSent)) {
+      const waitSeconds = OTP_RESEND_COOLDOWN_SECONDS
+      return res.status(429).json({ message: `Please wait ${waitSeconds}s before requesting another OTP.` })
+    }
 
-    user.resetPasswordOTP = otp
+    const otp = generateOtp()
+    const expires = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
+
+    user.resetPasswordOTP = undefined
+    user.resetPasswordOTPHash = hashOtp(otp)
+    user.resetPasswordOTPAttempts = 0
+    user.resetPasswordLastSent = new Date()
     user.resetPasswordExpires = expires
     await user.save()
 
@@ -361,8 +428,8 @@ exports.forgotPassword = async (req, res) => {
       await sendEmail({
         to: user.email,
         subject: 'Password Reset OTP',
-        text: `Your password reset OTP is ${otp}. It expires in 15 minutes.`,
-        html: `<p>Your password reset OTP is <strong>${otp}</strong>.</p><p>It expires in 15 minutes.</p>`
+        text: `Your password reset OTP is ${otp}. It expires in ${OTP_EXPIRY_MINUTES} minutes.`,
+        html: `<p>Your password reset OTP is <strong>${otp}</strong>.</p><p>It expires in ${OTP_EXPIRY_MINUTES} minutes.</p>`
       })
     } catch (mailError) {
       return res.status(500).json({ message: 'Failed to send OTP email. Please try again.' })
@@ -383,11 +450,38 @@ exports.verifyResetOTP = async (req, res) => {
     }
 
     const user = await User.findOne({ email: email.toLowerCase().trim() })
-    if (!user || user.resetPasswordOTP !== otp) {
+      .select('+resetPasswordOTP +resetPasswordOTPHash')
+    if (!user) {
       return res.status(400).json({ message: 'Invalid OTP' })
     }
 
-    if (!user.resetPasswordExpires || user.resetPasswordExpires < new Date()) {
+    if ((user.resetPasswordOTPAttempts || 0) >= OTP_ATTEMPT_LIMIT) {
+      return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
+    }
+
+    const providedHash = hashOtp(String(otp))
+    const storedHash = user.resetPasswordOTPHash
+    const legacyOtp = user.resetPasswordOTP
+    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === otp
+
+    if (!isMatch) {
+      user.resetPasswordOTPAttempts = (user.resetPasswordOTPAttempts || 0) + 1
+      await user.save()
+      if (user.resetPasswordOTPAttempts >= OTP_ATTEMPT_LIMIT) {
+        user.resetPasswordOTP = undefined
+        user.resetPasswordOTPHash = undefined
+        user.resetPasswordExpires = undefined
+        await user.save()
+        return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
+      }
+      return res.status(400).json({ message: 'Invalid OTP' })
+    }
+
+    if (isOtpExpired(user.resetPasswordExpires)) {
+      user.resetPasswordOTP = undefined
+      user.resetPasswordOTPHash = undefined
+      user.resetPasswordExpires = undefined
+      await user.save()
       return res.status(400).json({ message: 'OTP expired' })
     }
 
@@ -412,16 +506,28 @@ exports.resetPassword = async (req, res) => {
 
     const user = await User.findOne({ email: email.toLowerCase().trim() })
 
-    if (!user || user.resetPasswordOTP !== otp || !user.resetPasswordExpires) {
+    if (!user || !user.resetPasswordExpires) {
       return res.status(400).json({ message: 'Invalid OTP or email' })
     }
 
-    if (user.resetPasswordExpires < new Date()) {
+    const providedHash = hashOtp(String(otp))
+    const storedHash = user.resetPasswordOTPHash
+    const legacyOtp = user.resetPasswordOTP
+    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === otp
+
+    if (!isMatch) {
+      return res.status(400).json({ message: 'Invalid OTP or email' })
+    }
+
+    if (isOtpExpired(user.resetPasswordExpires)) {
       return res.status(400).json({ message: 'OTP expired' })
     }
 
     user.password = await bcrypt.hash(newPassword, 10)
     user.resetPasswordOTP = undefined
+    user.resetPasswordOTPHash = undefined
+    user.resetPasswordOTPAttempts = 0
+    user.resetPasswordLastSent = undefined
     user.resetPasswordExpires = undefined
     await user.save()
 
@@ -430,4 +536,9 @@ exports.resetPassword = async (req, res) => {
     console.error('resetPassword error:', error)
     res.status(500).json({ message: 'Failed to reset password' })
   }
+}
+
+exports.logout = async (req, res) => {
+  clearAuthCookie(res)
+  res.json({ message: 'Logged out successfully' })
 }

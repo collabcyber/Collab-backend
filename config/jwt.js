@@ -1,3 +1,4 @@
 module.exports = {
-  expiresIn: '7d'
+  accessExpiresIn: '15m',
+  cookieMaxAgeMs: 15 * 60 * 1000
 }

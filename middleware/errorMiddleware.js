@@ -3,6 +3,8 @@ exports.notFound = (req, res, next) => {
 }
 
 exports.errorHandler = (err, req, res, next) => {
+  const statusCode = err.statusCode || err.status || 500
+  const message = err.message || 'Server error'
   console.error('Unhandled error:', err)
-  res.status(500).json({ message: 'Server error' })
+  res.status(statusCode).json({ message })
 }

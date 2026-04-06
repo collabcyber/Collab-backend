@@ -1,11 +1,27 @@
 const express = require('express')
 const cors = require('cors')
+const helmet = require('helmet')
+const mongoSanitize = require('express-mongo-sanitize')
+const cookieParser = require('cookie-parser')
 const path = require('path')
 const { protect } = require('./middleware/authMiddleware')
 const { errorHandler, notFound } = require('./middleware/errorMiddleware')
+const { apiLimiter } = require('./middleware/rateLimiters')
+const { requestLogger } = require('./middleware/securityLogger')
 const app = express()
 
+app.set('trust proxy', 1)
+app.disable('x-powered-by')
+
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}))
+app.use(mongoSanitize({ replaceWith: '_' }))
+app.use(cookieParser())
 app.use(express.json({ limit: '1mb' }))
+app.use(express.urlencoded({ extended: false, limit: '1mb' }))
+app.use(apiLimiter)
+app.use(requestLogger)
 const envOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
   .map((value) => value.trim())

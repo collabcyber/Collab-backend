@@ -1,9 +1,13 @@
 const jwt = require('jsonwebtoken')
 const User = require('../models/User')
+const { setAuthCookie } = require('../utils/authCookies')
+const jwtConfig = require('../config/jwt')
 
 exports.protect = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1]
+    const headerToken = req.headers.authorization?.split(' ')[1]
+    const cookieToken = req.cookies?.accessToken
+    const token = cookieToken || headerToken
     if (!token) {
       return res.status(401).json({ message: 'No token provided' })
     }
@@ -24,6 +28,16 @@ exports.protect = async (req, res, next) => {
     if (!lastActive || Date.now() - lastActive > 2 * 60 * 1000) {
       user.lastActive = new Date()
       await user.save()
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000)
+    if (decoded?.exp && decoded.exp - nowSeconds < 5 * 60) {
+      const refreshed = jwt.sign(
+        { userId: user._id, email: user.email },
+        process.env.JWT_SECRET,
+        { expiresIn: jwtConfig.accessExpiresIn }
+      )
+      setAuthCookie(res, refreshed)
     }
 
     req.user = { userId: user._id, email: user.email, role: user.role }

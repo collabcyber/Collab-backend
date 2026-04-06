@@ -20,7 +20,7 @@ exports.getProfile = async (req, res) => {
   try {
     const userId = req.user.userId
 
-    const user = await User.findById(userId)
+    const user = await User.findById(userId).select('+password')
       .populate('college', 'name type')
 
     if (!user) {
@@ -126,6 +126,8 @@ exports.changePassword = async (req, res) => {
 exports.getLeaderboard = async (req, res) => {
   try {
     const { college, page = 1, limit = 50 } = req.query
+    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50))
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
 
     let query = {}
     
@@ -136,8 +138,8 @@ exports.getLeaderboard = async (req, res) => {
     const users = await User.find(query)
       .populate('college', 'name type')
       .sort({ points: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
+      .limit(parsedLimit)
+      .skip((parsedPage - 1) * parsedLimit)
       .select('name points badges college')
 
     const total = await User.countDocuments(query)
@@ -145,10 +147,10 @@ exports.getLeaderboard = async (req, res) => {
     res.json({
       users,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: parsedPage,
+        limit: parsedLimit,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / parsedLimit)
       }
     })
   } catch (error) {
@@ -187,6 +189,8 @@ exports.getUserProjects = async (req, res) => {
   try {
     const userId = req.user.userId
     const { status = 'all', page = 1, limit = 10 } = req.query
+    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 10))
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
 
     let query = { $or: [{ owner: userId }, { teamMembers: userId }] }
     
@@ -199,18 +203,18 @@ exports.getUserProjects = async (req, res) => {
       .populate('owner', 'name email')
       .populate('teamMembers', 'name email')
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
+      .limit(parsedLimit)
+      .skip((parsedPage - 1) * parsedLimit)
 
     const total = await Project.countDocuments(query)
 
     res.json({
       projects,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: parsedPage,
+        limit: parsedLimit,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / parsedLimit)
       }
     })
   } catch (error) {
@@ -225,11 +229,27 @@ exports.getAllUsers = async (req, res) => {
       return res.status(403).json({ message: 'Admin access required' })
     }
 
+    const { page = 1, limit = 50 } = req.query
+    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50))
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
+
     const users = await User.find({})
       .select('name email role emailVerified points lastActive createdAt')
       .sort({ createdAt: -1 })
+      .limit(parsedLimit)
+      .skip((parsedPage - 1) * parsedLimit)
 
-    res.json(users)
+    const total = await User.countDocuments({})
+
+    res.json({
+      users,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total,
+        pages: Math.ceil(total / parsedLimit)
+      }
+    })
   } catch (error) {
     console.error('Get all users error:', error)
     res.status(500).json({ message: 'Failed to fetch users' })

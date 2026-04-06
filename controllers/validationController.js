@@ -4,11 +4,27 @@ const { applyUserStats, POINTS } = require('../utils/points')
 
 exports.listValidations = async (req, res) => {
   try {
+    const { page = 1, limit = 20 } = req.query
+    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
+
     const projects = await Project.find({ status: 'validation' })
       .populate('owner', 'name')
       .sort({ updatedAt: -1 })
+      .limit(parsedLimit)
+      .skip((parsedPage - 1) * parsedLimit)
 
-    res.json({ projects })
+    const total = await Project.countDocuments({ status: 'validation' })
+
+    res.json({
+      projects,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total,
+        pages: Math.ceil(total / parsedLimit)
+      }
+    })
   } catch (error) {
     console.error('List validations error:', error)
     res.status(500).json({ message: 'Failed to fetch validation projects' })
