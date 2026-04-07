@@ -4,6 +4,7 @@ const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid id')
 const optionalId = z.string().optional()
 const email = z.string().email()
 const otp = z.string().min(4).max(8)
+const twoFactorCode = z.string().min(6).max(8)
 const password = z.string().min(8).max(128)
 const text = z.string().min(1).max(1000)
 const shortText = z.string().min(1).max(200)
@@ -70,6 +71,19 @@ const verifyEmailBody = z.object({
 
 const resendVerificationBody = z.object({
   email
+})
+
+const adminTwoFactorConfirmBody = z.object({
+  code: twoFactorCode
+})
+
+const adminTwoFactorVerifyLoginBody = z.object({
+  token: z.string().min(10),
+  code: twoFactorCode
+})
+
+const adminTwoFactorDisableBody = z.object({
+  code: twoFactorCode
 })
 
 const forgotPasswordBody = z.object({
@@ -214,7 +228,10 @@ module.exports = {
     resendVerificationBody,
     forgotPasswordBody,
     verifyResetBody,
-    resetPasswordBody
+    resetPasswordBody,
+    adminTwoFactorConfirmBody,
+    adminTwoFactorVerifyLoginBody,
+    adminTwoFactorDisableBody
   },
   user: {
     updateProfileBody,

@@ -2,10 +2,15 @@ const User = require('../models/User')
 const College = require('../models/College')
 const generateToken = require('../utils/generateToken')
 const jwtConfig = require('../config/jwt')
+const jwt = require('jsonwebtoken')
 const bcrypt = require('bcryptjs')
 const mongoose = require('mongoose')
+const speakeasy = require('speakeasy')
+const qrcode = require('qrcode')
 const { sendEmail } = require('../services/emailService')
 const { setAuthCookie, clearAuthCookie } = require('../utils/authCookies')
+const { encrypt, decrypt } = require('../utils/crypto')
+const { logSecurityEvent } = require('../middleware/securityLogger')
 const {
   OTP_EXPIRY_MINUTES,
   OTP_ATTEMPT_LIMIT,
@@ -15,6 +20,8 @@ const {
   isOtpExpired,
   canResendOtp
 } = require('../utils/otp')
+
+const TWO_FACTOR_TOKEN_TTL = '5m'
 
 const emailIsValid = (email) => {
   const re = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
@@ -253,6 +260,7 @@ exports.verifyEmail = async (req, res) => {
     }
 
     if ((user.emailVerificationOTPAttempts || 0) >= OTP_ATTEMPT_LIMIT) {
+      logSecurityEvent('otp_lockout', req, { userId: user._id })
       return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
     }
 
@@ -382,6 +390,198 @@ exports.resendVerificationOTP = async (req, res) => {
   }
 }
 
+const getTwoFactorSecret = (user) => {
+  if (!user?.twoFactorSecret) {
+    return null
+  }
+  try {
+    return decrypt(user.twoFactorSecret)
+  } catch (error) {
+    console.error('Failed to decrypt 2FA secret:', error)
+    return null
+  }
+}
+
+exports.adminTwoFactorSetup = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('+twoFactorSecret')
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    if (user.twoFactorEnabled) {
+      return res.status(400).json({ message: 'Two-factor authentication is already enabled' })
+    }
+
+    const secret = speakeasy.generateSecret({
+      name: `Collab (${user.email})`
+    })
+
+    user.twoFactorSecret = encrypt(secret.base32)
+    user.twoFactorPending = true
+    await user.save()
+
+    const qrCodeDataUrl = await qrcode.toDataURL(secret.otpauth_url)
+
+    res.json({
+      message: 'Scan the QR code with your authenticator app and confirm the code.',
+      otpauthUrl: secret.otpauth_url,
+      qrCodeDataUrl
+    })
+  } catch (error) {
+    console.error('adminTwoFactorSetup error:', error)
+    res.status(500).json({ message: 'Failed to start two-factor setup' })
+  }
+}
+
+exports.adminTwoFactorConfirm = async (req, res) => {
+  try {
+    const { code } = req.body
+    const user = await User.findById(req.user.userId).select('+twoFactorSecret')
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    const secret = getTwoFactorSecret(user)
+    if (!secret) {
+      return res.status(400).json({ message: 'Two-factor setup not initialized' })
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret,
+      encoding: 'base32',
+      token: code,
+      window: 1
+    })
+
+    if (!verified) {
+      logSecurityEvent('admin_2fa_failed', req, { reason: 'invalid_code', userId: user._id })
+      return res.status(400).json({ message: 'Invalid authentication code' })
+    }
+
+    user.twoFactorEnabled = true
+    user.twoFactorPending = false
+    user.twoFactorLastVerified = new Date()
+    await user.save()
+
+    res.json({ message: 'Two-factor authentication enabled' })
+  } catch (error) {
+    console.error('adminTwoFactorConfirm error:', error)
+    res.status(500).json({ message: 'Failed to enable two-factor authentication' })
+  }
+}
+
+exports.adminTwoFactorVerifyLogin = async (req, res) => {
+  try {
+    const { token, code } = req.body
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    if (decoded?.type !== 'admin-2fa') {
+      return res.status(401).json({ message: 'Invalid two-factor session' })
+    }
+
+    const user = await User.findById(decoded.userId)
+      .select('+twoFactorSecret')
+      .populate('college')
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    if (!user.twoFactorEnabled) {
+      return res.status(400).json({ message: 'Two-factor is not enabled for this account' })
+    }
+
+    const secret = getTwoFactorSecret(user)
+    if (!secret) {
+      return res.status(400).json({ message: 'Two-factor setup not initialized' })
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret,
+      encoding: 'base32',
+      token: code,
+      window: 1
+    })
+
+    if (!verified) {
+      logSecurityEvent('admin_2fa_failed', req, { reason: 'invalid_code', userId: user._id })
+      return res.status(401).json({ message: 'Invalid authentication code' })
+    }
+
+    user.twoFactorLastVerified = new Date()
+    await user.save()
+
+    const accessToken = generateToken(
+      { userId: user._id, email: user.email, tfa: true },
+      process.env.JWT_SECRET,
+      { expiresIn: jwtConfig.accessExpiresIn }
+    )
+    setAuthCookie(res, accessToken)
+
+    res.json({
+      message: 'Two-factor authentication successful',
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        college: user.college ? { id: user.college._id, name: user.college.name, type: user.college.type } : null,
+        college_id: user.college_id || user.college?._id,
+        course: user.course,
+        yearOfStudy: user.yearOfStudy,
+        skills: user.skills,
+        primaryCategory: user.primaryCategory,
+        points: user.points,
+        badges: user.badges,
+        role: user.role
+      }
+    })
+  } catch (error) {
+    console.error('adminTwoFactorVerifyLogin error:', error)
+    res.status(500).json({ message: 'Failed to verify two-factor authentication' })
+  }
+}
+
+exports.adminTwoFactorDisable = async (req, res) => {
+  try {
+    const { code } = req.body
+    const user = await User.findById(req.user.userId).select('+twoFactorSecret')
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    if (!user.twoFactorEnabled) {
+      return res.status(400).json({ message: 'Two-factor authentication is already disabled' })
+    }
+
+    const secret = getTwoFactorSecret(user)
+    if (!secret) {
+      return res.status(400).json({ message: 'Two-factor setup not initialized' })
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret,
+      encoding: 'base32',
+      token: code,
+      window: 1
+    })
+
+    if (!verified) {
+      logSecurityEvent('admin_2fa_failed', req, { reason: 'invalid_code', userId: user._id })
+      return res.status(401).json({ message: 'Invalid authentication code' })
+    }
+
+    user.twoFactorEnabled = false
+    user.twoFactorPending = false
+    user.twoFactorSecret = undefined
+    user.twoFactorLastVerified = undefined
+    await user.save()
+
+    res.json({ message: 'Two-factor authentication disabled' })
+  } catch (error) {
+    console.error('adminTwoFactorDisable error:', error)
+    res.status(500).json({ message: 'Failed to disable two-factor authentication' })
+  }
+}
+
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body
@@ -398,16 +598,26 @@ exports.login = async (req, res) => {
       .select('+password +emailVerificationOTP +emailVerificationOTPHash +emailVerificationOTPAttempts')
       .populate('college')
     if (!user) {
+      logSecurityEvent('auth_failure', req, { reason: 'user_not_found' })
       return res.status(401).json({ message: 'Invalid email or password' })
     }
 
     if (!user.emailVerified) {
+      logSecurityEvent('auth_failure', req, { reason: 'email_unverified', userId: user._id })
       return res.status(401).json({ message: 'Please verify your email first' })
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password)
     if (!isPasswordValid) {
+      logSecurityEvent('auth_failure', req, { reason: 'invalid_password', userId: user._id })
       return res.status(401).json({ message: 'Invalid email or password' })
+    }
+
+    if (user.role === 'admin' && !passwordIsStrong(password)) {
+      logSecurityEvent('weak_admin_password', req, { userId: user._id })
+      return res.status(403).json({
+        message: 'Admin password is too weak. Please reset your password to continue.'
+      })
     }
 
     // Update last activity
@@ -421,8 +631,21 @@ exports.login = async (req, res) => {
     user.lastActive = new Date()
     await user.save()
 
+    if (user.role === 'admin' && user.twoFactorEnabled) {
+      const twoFactorToken = generateToken(
+        { userId: user._id, type: 'admin-2fa' },
+        process.env.JWT_SECRET,
+        { expiresIn: TWO_FACTOR_TOKEN_TTL }
+      )
+      return res.status(200).json({
+        message: 'Two-factor authentication required',
+        twoFactorRequired: true,
+        twoFactorToken
+      })
+    }
+
     const token = generateToken(
-      { userId: user._id, email: user.email },
+      { userId: user._id, email: user.email, tfa: user.role === 'admin' ? true : undefined },
       process.env.JWT_SECRET,
       { expiresIn: jwtConfig.accessExpiresIn }
     )
@@ -510,6 +733,7 @@ exports.verifyResetOTP = async (req, res) => {
     }
 
     if ((user.resetPasswordOTPAttempts || 0) >= OTP_ATTEMPT_LIMIT) {
+      logSecurityEvent('otp_lockout', req, { userId: user._id })
       return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
     }
 

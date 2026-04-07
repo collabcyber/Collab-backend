@@ -40,6 +40,10 @@ exports.protect = async (req, res, next) => {
       setAuthCookie(res, refreshed)
     }
 
+    if (user.role === 'admin' && user.twoFactorEnabled && decoded?.tfa !== true) {
+      return res.status(401).json({ message: 'Two-factor authentication required' })
+    }
+
     req.user = { userId: user._id, email: user.email, role: user.role }
     next()
   } catch (error) {

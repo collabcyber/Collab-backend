@@ -46,6 +46,8 @@ exports.getProfile = async (req, res) => {
       validationsGiven: user.validationsGiven,
       helpfulFeedback: user.helpfulFeedback,
       showContactToTeam: user.showContactToTeam,
+      twoFactorEnabled: user.twoFactorEnabled,
+      twoFactorPending: user.twoFactorPending,
       role: user.role
     })
   } catch (error) {
@@ -59,7 +61,7 @@ exports.updateProfile = async (req, res) => {
     const userId = req.user.userId
     const { name, course, yearOfStudy, skills, primaryCategory, showContactToTeam, phone } = req.body
 
-    const user = await User.findById(userId)
+    const user = await User.findById(userId).select('+password')
     if (!user) {
       return res.status(404).json({ message: 'User not found' })
     }

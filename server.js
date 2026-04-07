@@ -1,6 +1,7 @@
 require('./config/loadEnv')
 const app = require('./app')
 const connectDB = require('./config/db')
+const { validateEnv } = require('./config/env')
 const mongoose = require('mongoose')
 const { seedColleges } = require('./services/collegeService')
 const fs = require('fs')
@@ -12,6 +13,7 @@ let server
 
 const startServer = async () => {
   try {
+    validateEnv()
     const uploadsDir = path.join(__dirname, 'uploads')
     if (!fs.existsSync(uploadsDir)) {
       fs.mkdirSync(uploadsDir, { recursive: true })
