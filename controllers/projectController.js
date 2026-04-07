@@ -230,12 +230,26 @@ exports.getProjects = async (req, res) => {
       }
     }
 
-    const projects = await Project.find(filter)
-      .populate('owner', 'name')
-      .populate('college', 'name type')
-      .sort({ createdAt: -1 })
-      .limit(parsedLimit)
-      .skip((parsedPage - 1) * parsedLimit)
+    let projects
+    try {
+      projects = await Project.find(filter)
+        .populate('owner', 'name')
+        .populate('college', 'name type')
+        .sort({ createdAt: -1 })
+        .limit(parsedLimit)
+        .skip((parsedPage - 1) * parsedLimit)
+    } catch (populateError) {
+      if (populateError?.name === 'CastError' && populateError?.path === 'college') {
+        console.warn('Project college populate failed, falling back without college populate.')
+        projects = await Project.find(filter)
+          .populate('owner', 'name')
+          .sort({ createdAt: -1 })
+          .limit(parsedLimit)
+          .skip((parsedPage - 1) * parsedLimit)
+      } else {
+        throw populateError
+      }
+    }
 
     const total = await Project.countDocuments(filter)
 
