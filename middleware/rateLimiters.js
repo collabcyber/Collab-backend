@@ -1,6 +1,12 @@
 const rateLimit = require('express-rate-limit')
 const { logSecurityEvent } = require('./securityLogger')
 
+const getClientIp = (req) =>
+  req.headers['cf-connecting-ip']
+    || req.headers['x-real-ip']
+    || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+    || req.ip
+
 const createLimiter = (options) =>
   rateLimit({
     windowMs: options.windowMs,
@@ -8,6 +14,7 @@ const createLimiter = (options) =>
     standardHeaders: true,
     legacyHeaders: false,
     message: { message: options.message || 'Too many requests' },
+    keyGenerator: getClientIp,
     handler: (req, res) => {
       logSecurityEvent('rate_limit', req, {
         limit: options.max,
