@@ -328,6 +328,60 @@ exports.verifyEmail = async (req, res) => {
   }
 }
 
+exports.resendVerificationOTP = async (req, res) => {
+  try {
+    const { email } = req.body
+    if (!email || !emailIsValid(email)) {
+      return res.status(400).json({ message: 'Enter a valid email' })
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() })
+      .select('+emailVerificationOTP +emailVerificationOTPHash +emailVerificationOTPAttempts')
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    if (user.emailVerified) {
+      return res.status(400).json({ message: 'Email already verified' })
+    }
+
+    if (!canResendOtp(user.emailVerificationLastSent)) {
+      const waitSeconds = OTP_RESEND_COOLDOWN_SECONDS
+      return res.status(429).json({ message: `Please wait ${waitSeconds}s before requesting another OTP.` })
+    }
+
+    const otp = generateOtp()
+    const expires = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
+    const verifyLink = buildVerifyLink(user.email)
+
+    user.emailVerificationOTP = undefined
+    user.emailVerificationOTPHash = hashOtp(otp)
+    user.emailVerificationOTPAttempts = 0
+    user.emailVerificationLastSent = new Date()
+    user.emailVerificationExpires = expires
+    await user.save()
+
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: 'Email Verification OTP',
+        text: `Your email verification OTP is ${otp}. It expires in ${OTP_EXPIRY_MINUTES} minutes. Verify here: ${verifyLink}`,
+        html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in ${OTP_EXPIRY_MINUTES} minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
+      })
+    } catch (mailError) {
+      return res.status(500).json({ message: 'Failed to resend verification email. Please try again.' })
+    }
+
+    return res.status(200).json({
+      message: 'OTP resent. Please check your email.',
+      email: user.email
+    })
+  } catch (error) {
+    console.error('resendVerificationOTP error:', error)
+    res.status(500).json({ message: 'Failed to resend OTP' })
+  }
+}
+
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body

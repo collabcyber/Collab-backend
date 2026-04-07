@@ -68,6 +68,10 @@ const verifyEmailBody = z.object({
   otp
 })
 
+const resendVerificationBody = z.object({
+  email
+})
+
 const forgotPasswordBody = z.object({
   email
 })
@@ -207,6 +211,7 @@ module.exports = {
     registerBody,
     loginBody,
     verifyEmailBody,
+    resendVerificationBody,
     forgotPasswordBody,
     verifyResetBody,
     resetPasswordBody
