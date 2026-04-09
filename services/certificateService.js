@@ -40,38 +40,43 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
     const stream = fs.createWriteStream(filePath)
     doc.pipe(stream)
 
-    doc.rect(20, 20, doc.page.width - 40, doc.page.height - 40).lineWidth(2).stroke('#6C5CE7')
+    const pageWidth = doc.page.width
+    const contentX = 60
+    const contentWidth = pageWidth - 120
 
-    doc.fontSize(26).fillColor('#1f2937').text('Collab', { align: 'center' })
-    doc.moveDown(0.5)
-    doc.fontSize(20).fillColor('#111827').text('Validation Phase Certificate', { align: 'center' })
-    doc.moveDown(1)
-
-    doc.fontSize(14).fillColor('#374151')
-      .text(`This certifies that`, { align: 'center' })
-    doc.moveDown(0.6)
-    doc.fontSize(22).fillColor('#111827').text(userName, { align: 'center' })
-    doc.moveDown(0.6)
-    doc.fontSize(14).fillColor('#374151')
-      .text(`is actively working on the project`, { align: 'center' })
-    doc.moveDown(0.6)
-    doc.fontSize(18).fillColor('#111827').text(`"${projectTitle}"`, { align: 'center' })
-    doc.moveDown(0.6)
-    doc.fontSize(14).fillColor('#374151')
-      .text(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, { align: 'center' })
-
-    if (collegeName) {
-      doc.moveDown(0.8)
-      doc.fontSize(12).fillColor('#6b7280')
-        .text(`College: ${collegeName}`, { align: 'center' })
+    const centerText = (text, y, size, color = '#111827') => {
+      doc.fontSize(size).fillColor(color)
+      doc.text(text, contentX, y, { width: contentWidth, align: 'center' })
     }
 
-    doc.moveDown(1.2)
-    doc.fontSize(10).fillColor('#6b7280')
-      .text(`Certificate ID: ${certificateId}`, { align: 'center' })
-    doc.moveDown(0.3)
-    doc.fontSize(10).fillColor('#6b7280')
-      .text(`Verify: ${buildVerificationUrl(certificateId)}`, { align: 'center' })
+    doc.rect(20, 20, pageWidth - 40, doc.page.height - 40).lineWidth(2).stroke('#6C5CE7')
+
+    let y = 90
+    centerText('Collab', y, 28, '#1f2937')
+    y += 42
+    centerText('Validation Phase Certificate', y, 20, '#111827')
+    y += 55
+
+    centerText('This certifies that', y, 14, '#374151')
+    y += 32
+    centerText(userName, y, 24, '#111827')
+    y += 36
+    centerText('is actively working on the project', y, 14, '#374151')
+    y += 32
+    centerText(`"${projectTitle}"`, y, 18, '#111827')
+    y += 34
+    centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, y, 14, '#374151')
+    y += 46
+
+    if (collegeName) {
+      centerText(`College: ${collegeName}`, y, 12, '#6b7280')
+      y += 28
+    }
+
+    y = Math.max(y, doc.page.height - 160)
+    centerText(`Certificate ID: ${certificateId}`, y, 10, '#6b7280')
+    y += 18
+    centerText(`Verify: ${buildVerificationUrl(certificateId)}`, y, 10, '#6b7280')
 
     doc.end()
     stream.on('finish', resolve)
