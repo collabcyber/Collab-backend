@@ -57,35 +57,25 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
       doc.rect(20, 20, pageWidth - 40, pageHeight - 40).lineWidth(2).stroke('#6C5CE7')
     }
 
-    let y = pageHeight * 0.35
-    centerText('This certifies that', y, 14)
-    y += 40
-    centerText(userName, y, 34, 'Times-Italic')
+    const certY = pageHeight * 0.40
+    const workY = pageHeight * 0.56
+    const nameSize = 34
+    const nameY = Math.round(((certY + 14) + workY - nameSize) / 2) - 8
 
-    const lineWidth = pageWidth * 0.45
-    const lineY = y + 40
-    doc
-      .moveTo((pageWidth - lineWidth) / 2, lineY)
-      .lineTo((pageWidth + lineWidth) / 2, lineY)
-      .lineWidth(1.5)
-      .strokeColor('#111827')
-      .stroke()
-
-    y = lineY + 18
-    centerText('is actively working on the project', y, 13)
-    y += 30
-    centerText(`"${projectTitle}"`, y, 16, 'Times-Italic')
-    y += 30
-    centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, y, 12)
-    y += 28
+    centerText('This certifies that', certY, 14)
+    centerText(userName, nameY, nameSize, 'Times-Italic')
+    centerText('is actively working on the project', workY, 13)
+    centerText(`"${projectTitle}"`, pageHeight * 0.60, 16, 'Times-Italic')
+    centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, pageHeight * 0.64, 12)
 
     if (collegeName) {
-      centerText(`College: ${collegeName}`, y, 12)
+      centerText(`College: ${collegeName.toUpperCase()}`, pageHeight * 0.69, 12)
     }
 
-    const footerY = pageHeight * 0.88
-    centerText(`Certificate ID: ${certificateId}`, footerY, 9, 'Times-Roman', '#374151')
-    centerText(`Verify: ${buildVerificationUrl(certificateId)}`, footerY + 16, 9, 'Times-Roman', '#374151')
+    const footerY1 = pageHeight * 0.90
+    const footerY2 = pageHeight * 0.93
+    centerText(`Certificate ID: ${certificateId}`, footerY1, 9, 'Times-Roman', '#374151')
+    centerText(`Verify: ${buildVerificationUrl(certificateId)}`, footerY2, 9, 'Times-Roman', '#374151')
 
     doc.end()
     stream.on('finish', resolve)
