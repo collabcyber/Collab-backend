@@ -244,12 +244,13 @@ exports.register = async (req, res) => {
 exports.verifyEmail = async (req, res) => {
   try {
     const { email, otp } = req.body
-    if (!email || !otp) {
+    const normalizedOtp = String(otp || '').replace(/\D/g, '')
+    if (!email || !normalizedOtp) {
       return res.status(400).json({ message: 'Email and OTP are required' })
     }
 
     const user = await User.findOne({ email: email.toLowerCase().trim() })
-      .select('+password')
+      .select('+password +emailVerificationOTP +emailVerificationOTPHash')
       .populate('college')
     if (!user) {
       return res.status(404).json({ message: 'User not found' })
@@ -264,10 +265,10 @@ exports.verifyEmail = async (req, res) => {
       return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
     }
 
-    const providedHash = hashOtp(String(otp))
+    const providedHash = hashOtp(normalizedOtp)
     const storedHash = user.emailVerificationOTPHash
     const legacyOtp = user.emailVerificationOTP
-    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === otp
+    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === normalizedOtp
 
     if (!isMatch) {
       user.emailVerificationOTPAttempts = (user.emailVerificationOTPAttempts || 0) + 1
@@ -722,7 +723,8 @@ exports.forgotPassword = async (req, res) => {
 exports.verifyResetOTP = async (req, res) => {
   try {
     const { email, otp } = req.body
-    if (!email || !otp) {
+    const normalizedOtp = String(otp || '').replace(/\D/g, '')
+    if (!email || !normalizedOtp) {
       return res.status(400).json({ message: 'Email and OTP are required' })
     }
 
@@ -737,10 +739,10 @@ exports.verifyResetOTP = async (req, res) => {
       return res.status(429).json({ message: 'Too many invalid attempts. Please request a new OTP.' })
     }
 
-    const providedHash = hashOtp(String(otp))
+    const providedHash = hashOtp(normalizedOtp)
     const storedHash = user.resetPasswordOTPHash
     const legacyOtp = user.resetPasswordOTP
-    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === otp
+    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === normalizedOtp
 
     if (!isMatch) {
       user.resetPasswordOTPAttempts = (user.resetPasswordOTPAttempts || 0) + 1
@@ -773,8 +775,9 @@ exports.verifyResetOTP = async (req, res) => {
 exports.resetPassword = async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body
+    const normalizedOtp = String(otp || '').replace(/\D/g, '')
 
-    if (!email || !otp || !newPassword) {
+    if (!email || !normalizedOtp || !newPassword) {
       return res.status(400).json({ message: 'Email, OTP and new password are required' })
     }
 
@@ -788,10 +791,10 @@ exports.resetPassword = async (req, res) => {
       return res.status(400).json({ message: 'Invalid OTP or email' })
     }
 
-    const providedHash = hashOtp(String(otp))
+    const providedHash = hashOtp(normalizedOtp)
     const storedHash = user.resetPasswordOTPHash
     const legacyOtp = user.resetPasswordOTP
-    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === otp
+    const isMatch = storedHash ? providedHash === storedHash : legacyOtp === normalizedOtp
 
     if (!isMatch) {
       return res.status(400).json({ message: 'Invalid OTP or email' })
