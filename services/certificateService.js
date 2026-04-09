@@ -41,64 +41,44 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
     doc.pipe(stream)
 
     const pageWidth = doc.page.width
+    const pageHeight = doc.page.height
     const contentX = 60
     const contentWidth = pageWidth - 120
 
-    const centerText = (text, y, size, color = '#111827') => {
-      doc.fontSize(size).fillColor(color)
+    const centerText = (text, y, size, font = 'Times-Roman', color = '#111827') => {
+      doc.font(font).fontSize(size).fillColor(color)
       doc.text(text, contentX, y, { width: contentWidth, align: 'center' })
     }
 
-    doc.rect(20, 20, pageWidth - 40, doc.page.height - 40).lineWidth(2).stroke('#6C5CE7')
-
-    // Decorative graphics
-    doc.save()
-    doc.fillColor('#6C5CE7').fillOpacity(0.12)
-    doc.circle(140, 130, 60).fill()
-    doc.circle(pageWidth - 140, doc.page.height - 140, 70).fill()
-    doc.restore()
-
-    doc.save()
-    doc.fillColor('#8b7bff').fillOpacity(0.16)
-    doc.roundedRect(pageWidth - 260, 90, 160, 30, 15).fill()
-    doc.restore()
-
-    doc.save()
-    doc.fillOpacity(0.06)
-    doc.fontSize(120).fillColor('#6C5CE7')
-    doc.rotate(-12, { origin: [pageWidth / 2, doc.page.height / 2] })
-    doc.text('COLLAB', 0, doc.page.height / 2 - 60, {
-      width: pageWidth,
-      align: 'center'
-    })
-    doc.restore()
-
-    let y = 90
-    centerText('Collab', y, 28, '#1f2937')
-    y += 42
-    centerText('Validation Phase Certificate', y, 20, '#111827')
-    y += 55
-
-    centerText('This certifies that', y, 14, '#374151')
-    y += 32
-    centerText(userName, y, 24, '#111827')
-    y += 36
-    centerText('is actively working on the project', y, 14, '#374151')
-    y += 32
-    centerText(`"${projectTitle}"`, y, 18, '#111827')
-    y += 34
-    centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, y, 14, '#374151')
-    y += 46
-
-    if (collegeName) {
-      centerText(`College: ${collegeName}`, y, 12, '#6b7280')
-      y += 28
+    const templatePath = path.join(__dirname, '..', 'assets', 'certificate-template.png')
+    if (fs.existsSync(templatePath)) {
+      doc.image(templatePath, 0, 0, { width: pageWidth, height: pageHeight })
+    } else {
+      doc.rect(20, 20, pageWidth - 40, pageHeight - 40).lineWidth(2).stroke('#6C5CE7')
     }
 
-    y = Math.max(y, doc.page.height - 160)
-    centerText(`Certificate ID: ${certificateId}`, y, 10, '#6b7280')
-    y += 18
-    centerText(`Verify: ${buildVerificationUrl(certificateId)}`, y, 10, '#6b7280')
+    centerText('This certifies that', pageHeight * 0.36, 14)
+    centerText(userName, pageHeight * 0.43, 34, 'Times-Italic')
+
+    const lineWidth = pageWidth * 0.42
+    const lineY = pageHeight * 0.49
+    doc
+      .moveTo((pageWidth - lineWidth) / 2, lineY)
+      .lineTo((pageWidth + lineWidth) / 2, lineY)
+      .lineWidth(1.5)
+      .strokeColor('#111827')
+      .stroke()
+
+    centerText('is actively working on the project', pageHeight * 0.52, 13)
+    centerText(`"${projectTitle}"`, pageHeight * 0.57, 16, 'Times-Italic')
+    centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, pageHeight * 0.62, 13)
+
+    if (collegeName) {
+      centerText(`College: ${collegeName}`, pageHeight * 0.68, 12)
+    }
+
+    centerText(`Certificate ID: ${certificateId}`, pageHeight * 0.86, 9, 'Times-Roman', '#374151')
+    centerText(`Verify: ${buildVerificationUrl(certificateId)}`, pageHeight * 0.89, 9, 'Times-Roman', '#374151')
 
     doc.end()
     stream.on('finish', resolve)
