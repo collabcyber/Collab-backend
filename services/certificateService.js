@@ -51,6 +51,28 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
 
     doc.rect(20, 20, pageWidth - 40, doc.page.height - 40).lineWidth(2).stroke('#6C5CE7')
 
+    // Decorative graphics
+    doc.save()
+    doc.fillColor('#6C5CE7').fillOpacity(0.12)
+    doc.circle(140, 130, 60).fill()
+    doc.circle(pageWidth - 140, doc.page.height - 140, 70).fill()
+    doc.restore()
+
+    doc.save()
+    doc.fillColor('#8b7bff').fillOpacity(0.16)
+    doc.roundedRect(pageWidth - 260, 90, 160, 30, 15).fill()
+    doc.restore()
+
+    doc.save()
+    doc.fillOpacity(0.06)
+    doc.fontSize(120).fillColor('#6C5CE7')
+    doc.rotate(-12, { origin: [pageWidth / 2, doc.page.height / 2] })
+    doc.text('COLLAB', 0, doc.page.height / 2 - 60, {
+      width: pageWidth,
+      align: 'center'
+    })
+    doc.restore()
+
     let y = 90
     centerText('Collab', y, 28, '#1f2937')
     y += 42
