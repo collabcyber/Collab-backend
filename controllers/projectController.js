@@ -6,6 +6,8 @@ const User = require('../models/User')
 const { createNotification } = require('./notificationController')
 const { applyUserStats, POINTS, computeBadges } = require('../utils/points')
 const { submitValidation } = require('./validationController')
+const { sendEmail } = require('../services/emailService')
+const { generateValidationCertificates, buildVerificationUrl } = require('../services/certificateService')
 
 const toId = (value) => (value ? value.toString() : '')
 
@@ -319,7 +321,7 @@ exports.getProjectById = async (req, res) => {
     const { id } = req.params
     const viewerId = req.user?.userId ? req.user.userId.toString() : ''
 
-    const project = await Project.findById(id)
+    const project = await Project.findById(id).populate('college', 'name')
       .populate('owner', 'name email phone lastActive')
       .populate('teamMembers', 'name email phone lastActive')
       .populate('interestedUsers', 'name email phone lastActive')
@@ -1145,9 +1147,71 @@ exports.startValidation = async (req, res) => {
       project.validation.sharedFiles = selected
     }
 
+    const memberIds = new Set([
+      toId(project.owner),
+      ...(project.teamMembers || []).map((member) => toId(member))
+    ].filter(Boolean))
+
+    const members = memberIds.size
+      ? await User.find({ _id: { $in: [...memberIds] } }).select('name email')
+      : []
+
+    const certificates = await generateValidationCertificates({ project, members })
+    project.validation.certificates = certificates
+
     await project.save()
 
-    res.json({ message: 'Project sent to validation', project })
+    const apiBase = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
+    const certMap = new Map(certificates.map((cert) => [toId(cert.user), cert]))
+
+    const emailResults = await Promise.allSettled(
+      members.map(async (member) => {
+        if (!member?.email) return
+        const cert = certMap.get(toId(member._id))
+        if (!cert) return
+        const relativePath = cert.url.startsWith('/') ? cert.url.slice(1) : cert.url
+        const filePath = path.join(__dirname, '..', relativePath)
+        const verifyUrl = buildVerificationUrl(cert.certificateId)
+        const downloadUrl = `${apiBase}${cert.url}`
+
+        const subject = 'Your Collab Validation Phase Certificate'
+        const text = `Hi ${member.name || 'there'},\n\nYour project "${project.title}" has entered the Validation phase.\n\nDownload your certificate: ${downloadUrl}\nVerify: ${verifyUrl}\n\n— Collab`
+        const html = `
+          <div style="font-family: Arial, sans-serif; line-height:1.6;">
+            <p>Hi ${member.name || 'there'},</p>
+            <p>Your project <strong>${project.title}</strong> has entered the <strong>Validation</strong> phase.</p>
+            <p>You can download your certificate here:</p>
+            <p><a href="${downloadUrl}">${downloadUrl}</a></p>
+            <p>Verification link:</p>
+            <p><a href="${verifyUrl}">${verifyUrl}</a></p>
+            <p style="color:#6b7280;">— Collab</p>
+          </div>
+        `
+
+        return sendEmail({
+          to: member.email,
+          subject,
+          text,
+          html,
+          attachments: [{
+            filename: cert.filename,
+            path: filePath,
+            contentType: 'application/pdf'
+          }]
+        })
+      })
+    )
+
+    const failedEmails = emailResults.filter((result) => result.status === 'rejected').length
+
+    res.json({
+      message: 'Project sent to validation',
+      project,
+      certificateEmails: {
+        total: members.length,
+        failed: failedEmails
+      }
+    })
   } catch (error) {
     console.error('Start validation error:', error)
     res.status(500).json({ message: 'Failed to send project to validation' })

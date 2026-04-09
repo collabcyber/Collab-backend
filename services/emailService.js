@@ -1,3 +1,5 @@
+const fs = require('fs')
+const path = require('path')
 const nodemailer = require('nodemailer')
 
 const getFetch = () => {
@@ -22,7 +24,34 @@ const sendWithTimeout = async (promise, ms, onTimeout) => {
   }
 }
 
-const sendViaResend = async ({ to, subject, text, html }) => {
+const buildAttachmentPayload = async (attachments = []) => {
+  if (!Array.isArray(attachments) || attachments.length === 0) return []
+
+  const results = []
+  for (const attachment of attachments) {
+    if (!attachment) continue
+    const filename = attachment.filename || (attachment.path ? path.basename(attachment.path) : 'attachment')
+    let content = attachment.content
+
+    if (!content && attachment.path) {
+      content = await fs.promises.readFile(attachment.path)
+    }
+
+    if (!content) continue
+
+    const bufferContent = Buffer.isBuffer(content) ? content : Buffer.from(content)
+    results.push({
+      filename,
+      content: bufferContent.toString('base64'),
+      type: attachment.contentType || attachment.type || 'application/octet-stream',
+      disposition: attachment.disposition || 'attachment'
+    })
+  }
+
+  return results
+}
+
+const sendViaResend = async ({ to, subject, text, html, attachments }) => {
   const apiKey = process.env.RESEND_API_KEY
   if (!apiKey) {
     throw new Error('RESEND_API_KEY must be set when EMAIL_PROVIDER=resend')
@@ -34,6 +63,7 @@ const sendViaResend = async ({ to, subject, text, html }) => {
   }
 
   const fetchFn = getFetch()
+  const resendAttachments = await buildAttachmentPayload(attachments)
   const controller = new AbortController()
   const timeoutMs = Number(process.env.EMAIL_SEND_TIMEOUT_MS || 12000)
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -50,7 +80,13 @@ const sendViaResend = async ({ to, subject, text, html }) => {
         to,
         subject,
         text,
-        html
+        html,
+        attachments: resendAttachments.length > 0
+          ? resendAttachments.map((item) => ({
+            filename: item.filename,
+            content: item.content
+          }))
+          : undefined
       }),
       signal: controller.signal
     })
@@ -66,7 +102,7 @@ const sendViaResend = async ({ to, subject, text, html }) => {
   }
 }
 
-const sendViaSendGrid = async ({ to, subject, text, html }) => {
+const sendViaSendGrid = async ({ to, subject, text, html, attachments }) => {
   const apiKey = process.env.SENDGRID_API_KEY
   if (!apiKey) {
     throw new Error('SENDGRID_API_KEY must be set when EMAIL_PROVIDER=sendgrid')
@@ -78,6 +114,7 @@ const sendViaSendGrid = async ({ to, subject, text, html }) => {
   }
 
   const fetchFn = getFetch()
+  const sendGridAttachments = await buildAttachmentPayload(attachments)
   const controller = new AbortController()
   const timeoutMs = Number(process.env.EMAIL_SEND_TIMEOUT_MS || 12000)
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -96,7 +133,15 @@ const sendViaSendGrid = async ({ to, subject, text, html }) => {
         content: [
           { type: 'text/plain', value: text || '' },
           { type: 'text/html', value: html || '' }
-        ]
+        ],
+        attachments: sendGridAttachments.length > 0
+          ? sendGridAttachments.map((item) => ({
+            content: item.content,
+            filename: item.filename,
+            type: item.type,
+            disposition: item.disposition
+          }))
+          : undefined
       }),
       signal: controller.signal
     })
@@ -157,14 +202,26 @@ const getTransporter = async () => {
   })
 }
 
-exports.sendEmail = async ({ to, subject, text, html }) => {
+const mapNodemailerAttachments = (attachments = []) => {
+  if (!Array.isArray(attachments) || attachments.length === 0) return undefined
+  return attachments
+    .filter(Boolean)
+    .map((attachment) => ({
+      filename: attachment.filename,
+      path: attachment.path,
+      content: attachment.content,
+      contentType: attachment.contentType || attachment.type
+    }))
+}
+
+exports.sendEmail = async ({ to, subject, text, html, attachments }) => {
   try {
     const provider = (process.env.EMAIL_PROVIDER || '').toLowerCase().trim()
     if (provider === 'resend') {
-      return await sendViaResend({ to, subject, text, html })
+      return await sendViaResend({ to, subject, text, html, attachments })
     }
     if (provider === 'sendgrid') {
-      return await sendViaSendGrid({ to, subject, text, html })
+      return await sendViaSendGrid({ to, subject, text, html, attachments })
     }
 
     const transporter = await getTransporter()
@@ -175,7 +232,8 @@ exports.sendEmail = async ({ to, subject, text, html }) => {
       to,
       subject,
       text,
-      html
+      html,
+      attachments: mapNodemailerAttachments(attachments)
     })
 
     // Prevent unhandled rejections if the send times out.

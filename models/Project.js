@@ -106,6 +106,13 @@ const ProjectSchema = new mongoose.Schema({
       enum: ['pending', 'passed', 'failed'],
       default: 'pending'
     },
+    certificates: [{
+      certificateId: { type: String, required: true },
+      user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+      url: { type: String, required: true },
+      filename: { type: String, required: true },
+      issuedAt: { type: Date, default: Date.now }
+    }],
     validatedAt: Date,
     featuredAt: Date
   },
