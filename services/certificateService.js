@@ -2,6 +2,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const PDFDocument = require('pdfkit')
+const Certificate = require('../models/Certificate')
 
 const ensureDir = (dirPath) => {
   if (!fs.existsSync(dirPath)) {
@@ -95,6 +96,8 @@ const generateValidationCertificates = async ({ project, members }) => {
 
   for (const member of members) {
     const certificateId = crypto.randomUUID()
+    const userId = member._id || member.id || member
+    const userName = member.name || 'Team Member'
     const result = await generateCertificatePdf({
       userName: member.name || 'Team Member',
       projectTitle: project.title,
@@ -104,11 +107,30 @@ const generateValidationCertificates = async ({ project, members }) => {
     })
     certificates.push({
       certificateId,
-      user: member._id || member.id || member,
+      user: userId,
+      userName,
       url: result.relativePath,
       filename: result.filename,
       issuedAt
     })
+  }
+
+
+  if (certificates.length) {
+    await Certificate.insertMany(
+      certificates.map((cert) => ({
+        certificateId: cert.certificateId,
+        project: project._id,
+        user: cert.user,
+        college: project.college || null,
+        projectTitle: project.title,
+        userName: cert.userName,
+        collegeName: project.college?.name || null,
+        issuedAt: cert.issuedAt,
+        url: cert.url,
+        filename: cert.filename
+      }))
+    )
   }
 
   return certificates

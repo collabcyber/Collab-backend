@@ -1,5 +1,6 @@
 const User = require('../models/User')
 const Project = require('../models/Project')
+const Certificate = require('../models/Certificate')
 
 exports.getPublicStats = async (req, res) => {
   try {
@@ -29,6 +30,35 @@ exports.getCertificate = async (req, res) => {
     const { certificateId } = req.params
     if (!certificateId) {
       return res.status(400).json({ message: 'Certificate id is required' })
+    }
+
+    const certificate = await Certificate.findOne({ certificateId })
+      .populate('user', 'name')
+      .populate('project', 'title')
+      .populate('college', 'name')
+
+    if (certificate) {
+      const apiBase = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
+      const downloadUrl = `${apiBase}${certificate.url}`
+      return res.json({
+        certificate: {
+          certificateId: certificate.certificateId,
+          issuedAt: certificate.issuedAt,
+          downloadUrl,
+          user: certificate.user ? {
+            id: certificate.user._id || certificate.user,
+            name: certificate.user.name || certificate.userName || 'Team Member'
+          } : undefined,
+          project: certificate.project ? {
+            id: certificate.project._id || certificate.project,
+            title: certificate.project.title || certificate.projectTitle
+          } : {
+            id: certificate.project,
+            title: certificate.projectTitle
+          },
+          college: certificate.college?.name || certificate.collegeName || null
+        }
+      })
     }
 
     const project = await Project.findOne({
