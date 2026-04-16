@@ -15,6 +15,7 @@ const {
   addProjectMessage,
   deleteProject,
   addProjectFile,
+  downloadProjectFile,
   deleteProjectFile,
   startValidation,
   startBuildPhase,
@@ -72,6 +73,13 @@ router.post('/:id/add-member', validate(z.object({ params: z.object({ id: object
 router.post('/:id/remove-member', validate(z.object({ params: z.object({ id: objectId }), body: project.removeMemberBody })), requireProjectOwner, removeTeamMember)
 router.post('/:id/messages', validate(z.object({ params: z.object({ id: objectId }), body: project.messageBody })), requireTeamMember, addProjectMessage)
 router.post('/:id/files', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, upload.single('file'), addProjectFile)
+router.get('/:id/files/:fileId/download', validate(z.object({
+  params: z.object({ id: objectId, fileId: z.string().min(1) }),
+  query: z.object({
+    exp: z.string().min(1),
+    sig: z.string().min(16)
+  })
+})), downloadProjectFile)
 router.delete('/:id/files/:fileId', validate(z.object({ params: z.object({ id: objectId, fileId: z.string() }) })), requireTeamMember, deleteProjectFile)
 
 // Validation feedback

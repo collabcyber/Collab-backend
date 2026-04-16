@@ -17,8 +17,8 @@ const ProjectSchema = new mongoose.Schema({
   visibility: { 
     type: String, 
     required: true,
-    enum: ['college', 'global'],
-    default: 'college'
+    enum: ['private', 'college', 'global'],
+    default: 'private'
   },
   college: { type: mongoose.Schema.Types.ObjectId, ref: 'College' },
   
@@ -54,6 +54,12 @@ const ProjectSchema = new mongoose.Schema({
   
   // Execution Plan (MANDATORY)
   executionPlan: { type: String, required: true },
+  security: {
+    ideaFingerprint: { type: String },
+    fingerprintAlgorithm: { type: String, default: 'sha256' },
+    fingerprintVersion: { type: Number, default: 1 },
+    fingerprintedAt: { type: Date }
+  },
   
   // Project Status & Team
   status: { 

@@ -1,5 +1,6 @@
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const mongoose = require('mongoose')
 const Project = require('../models/Project')
 const User = require('../models/User')
@@ -8,8 +9,63 @@ const { applyUserStats, POINTS, computeBadges } = require('../utils/points')
 const { submitValidation } = require('./validationController')
 const { sendEmail } = require('../services/emailService')
 const { generateValidationCertificates, buildVerificationUrl } = require('../services/certificateService')
+const { logSecurityEvent } = require('../middleware/securityLogger')
 
 const toId = (value) => (value ? value.toString() : '')
+const FILE_LINK_TTL_SECONDS = Math.max(60, parseInt(process.env.FILE_LINK_TTL_SECONDS || '900', 10) || 900)
+const FILE_ACCESS_SECRET = process.env.FILE_ACCESS_SECRET || process.env.JWT_SECRET || 'collab-file-access-secret'
+const PUBLIC_API_BASE = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
+const PROJECT_VISIBILITY = new Set(['private', 'college', 'global'])
+
+const createIdeaFingerprint = ({ title, shortPitch, description, executionPlan, category, ownerId }) => {
+  const normalized = [
+    title || '',
+    shortPitch || '',
+    description || '',
+    executionPlan || '',
+    category || '',
+    ownerId || ''
+  ]
+    .map((value) => String(value).trim().toLowerCase())
+    .join('|')
+  return crypto.createHash('sha256').update(normalized).digest('hex')
+}
+
+const createFileSignature = ({ projectId, fileId, userId, expiresAt }) =>
+  crypto
+    .createHmac('sha256', FILE_ACCESS_SECRET)
+    .update(`${projectId}:${fileId}:${userId}:${expiresAt}`)
+    .digest('hex')
+
+const buildSignedFileUrl = ({ projectId, fileId, userId }) => {
+  if (!projectId || !fileId || !userId) return ''
+  const expiresAt = Date.now() + FILE_LINK_TTL_SECONDS * 1000
+  const sig = createFileSignature({
+    projectId: projectId.toString(),
+    fileId: fileId.toString(),
+    userId: userId.toString(),
+    expiresAt
+  })
+  return `${PUBLIC_API_BASE}/api/projects/${projectId}/files/${fileId}/download?exp=${expiresAt}&sig=${sig}`
+}
+
+const verifyFileSignature = ({ projectId, fileId, userId, expiresAt, sig }) => {
+  if (!projectId || !fileId || !userId || !expiresAt || !sig) return false
+  const expNumber = Number(expiresAt)
+  if (!Number.isFinite(expNumber) || expNumber < Date.now()) return false
+
+  const expected = createFileSignature({
+    projectId: projectId.toString(),
+    fileId: fileId.toString(),
+    userId: userId.toString(),
+    expiresAt: expNumber
+  })
+
+  const expectedBuffer = Buffer.from(expected, 'utf8')
+  const providedBuffer = Buffer.from(String(sig), 'utf8')
+  if (expectedBuffer.length !== providedBuffer.length) return false
+  return crypto.timingSafeEqual(expectedBuffer, providedBuffer)
+}
 
 const normalizeLabel = (value) => {
   if (typeof value !== 'string') return ''
@@ -40,18 +96,45 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
   const ownerId = toId(project.owner?._id || project.owner)
   const isOwner = viewerId && ownerId === viewerId
   const isTeamMember = isViewerTeamMember(project, viewerId)
+  const isPrivilegedViewer = Boolean(isOwner || isTeamMember)
+
+  const withDownloadLinks = (files = []) =>
+    files.map((file) => {
+      const fileId = toId(file?._id || file?.filename)
+      return {
+        ...file,
+        downloadUrl: buildSignedFileUrl({
+          projectId: project._id,
+          fileId,
+          userId: viewerId
+        })
+      }
+    })
 
   if (!isOwner) {
     project.interestedUsers = []
+    project.security = undefined
   }
 
-  if (!isOwner && !isTeamMember) {
+  if (!isPrivilegedViewer) {
     project.teamMembers = (project.teamMembers || []).map((member) => ({
       _id: member._id,
       name: member.name || 'Member'
     }))
+
+    // Keep external view focused on a public summary, not the implementation details.
+    project.executionPlan = undefined
+    project.techProduct = undefined
+    project.businessStartup = undefined
+    project.designCreative = undefined
+    project.marketingContent = undefined
+    project.servicesOperations = undefined
+
     project.files = []
     project.messages = []
+    if (!['validation', 'validated', 'validation_failed'].includes(project.status) && project.validation) {
+      project.validation.sharedFiles = []
+    }
     if (project.owner) {
       const ownerId = project.owner._id || project.owner
       project.owner = {
@@ -61,8 +144,21 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
     }
   }
 
-  if (!isOwner && !isTeamMember && project.validation?.reviews) {
+  if (!isPrivilegedViewer && project.validation?.reviews) {
     project.validation.reviews = []
+  }
+
+  if (Array.isArray(project.files) && viewerId) {
+    project.files = withDownloadLinks(project.files)
+  }
+
+  if (Array.isArray(project.validation?.sharedFiles) && viewerId) {
+    project.validation.sharedFiles = withDownloadLinks(project.validation.sharedFiles)
+  }
+
+  project.accessWatermark = {
+    viewerId: viewerId || 'unknown',
+    issuedAt: new Date().toISOString()
   }
 
   return project
@@ -132,6 +228,15 @@ exports.createProject = async (req, res) => {
 
     const normalizedSkills = normalizeLabelList(skillsRequired)
     const normalizedRoles = normalizeLabelList(rolesNeeded)
+    const normalizedVisibility = PROJECT_VISIBILITY.has(visibility) ? visibility : 'private'
+    const ideaFingerprint = createIdeaFingerprint({
+      title: normalizedTitle,
+      shortPitch: normalizedShortPitch,
+      description: normalizedDescription,
+      executionPlan: normalizedExecutionPlan,
+      category: normalizedCategory,
+      ownerId: userId
+    })
 
     const project = new Project({
       title: normalizedTitle,
@@ -142,9 +247,15 @@ exports.createProject = async (req, res) => {
       rolesNeeded: normalizedRoles,
       skillsRequired: normalizedSkills,
       numberOfTeammates: Math.min(10, Math.max(1, parseInt(numberOfTeammates, 10) || 1)),
-      visibility: visibility || 'college',
+      visibility: normalizedVisibility,
       college: owner?.college || owner?.college_id || undefined,
       executionPlan: normalizedExecutionPlan,
+      security: {
+        ideaFingerprint,
+        fingerprintAlgorithm: 'sha256',
+        fingerprintVersion: 1,
+        fingerprintedAt: new Date()
+      },
       owner: userId,
       teamMembers: [userId],
       status: 'planning',
@@ -190,18 +301,23 @@ exports.getProjects = async (req, res) => {
     const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
     const parsedPage = Math.max(1, parseInt(page, 10) || 1)
     const filter = {}
+    const viewerId = req.user?.userId ? req.user.userId.toString() : ''
     const viewer = await User.findById(req.user.userId).select('college college_id')
     const viewerCollege = (viewer?.college || viewer?.college_id) ? (viewer.college || viewer.college_id).toString() : null
 
+    const visibilityFilter = [{ visibility: 'global' }]
     if (viewerCollege) {
-      filter.$or = [
-        { visibility: 'global' },
-        { visibility: 'college', college: viewerCollege }
-      ]
-    } else {
-      filter.visibility = 'global'
+      visibilityFilter.push({ visibility: 'college', college: viewerCollege })
     }
-    if (status && status !== 'all') {
+    if (viewerId) {
+      visibilityFilter.push({
+        visibility: 'private',
+        $or: [{ owner: viewerId }, { teamMembers: viewerId }]
+      })
+    }
+    filter.$or = visibilityFilter
+
+    if (typeof status === 'string' && status && status !== 'all') {
       filter.status = status
     } else {
       filter.status = { $ne: 'archived' }
@@ -258,9 +374,10 @@ exports.getProjects = async (req, res) => {
     }
 
     const total = await Project.countDocuments(filter)
+    const sanitizedProjects = projects.map((project) => sanitizeProjectForViewer(project, viewerId))
 
     res.json({
-      projects,
+      projects: sanitizedProjects,
       pagination: {
         page: parsedPage,
         limit: parsedLimit,
@@ -279,6 +396,7 @@ exports.getValidationProjects = async (req, res) => {
     const { page = 1, limit = 20 } = req.query
     const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
     const parsedPage = Math.max(1, parseInt(page, 10) || 1)
+    const viewerId = req.user?.userId ? req.user.userId.toString() : ''
 
     const projects = await Project.find({ status: 'validation' })
       .populate('owner', 'name')
@@ -287,9 +405,10 @@ exports.getValidationProjects = async (req, res) => {
       .skip((parsedPage - 1) * parsedLimit)
 
     const total = await Project.countDocuments({ status: 'validation' })
+    const sanitizedProjects = projects.map((project) => sanitizeProjectForViewer(project, viewerId))
 
     res.json({
-      projects,
+      projects: sanitizedProjects,
       pagination: {
         page: parsedPage,
         limit: parsedLimit,
@@ -340,6 +459,10 @@ exports.getProjectById = async (req, res) => {
 
     const isOwner = toId(project.owner?._id) === viewerId
     const isTeamMember = isViewerTeamMember(project, viewerId) || isOwner
+
+    if (project.visibility === 'private' && !isOwner && !isTeamMember) {
+      return res.status(403).json({ message: 'This project is visible only to the project team' })
+    }
 
     if (project.visibility === 'college' && !isOwner && !isTeamMember) {
       const viewer = await User.findById(viewerId).select('college college_id')
@@ -627,7 +750,10 @@ exports.updateProjectRequirements = async (req, res) => {
     if (typeof numberOfTeammates !== 'undefined') {
       project.numberOfTeammates = nextTeamSize
     }
-    if (typeof visibility === 'string' && ['college', 'global'].includes(visibility)) {
+    if (typeof visibility === 'string') {
+      if (!PROJECT_VISIBILITY.has(visibility)) {
+        return res.status(400).json({ message: 'Visibility must be private, college, or global' })
+      }
       project.visibility = visibility
     }
     if (typeof rolesNeeded !== 'undefined') {
@@ -704,6 +830,22 @@ exports.updateProjectDetails = async (req, res) => {
         .map((tag) => (typeof tag === 'string' ? tag.trim() : ''))
         .filter(Boolean)
       project.tags = normalizedTags
+    }
+
+    const updatedFingerprint = createIdeaFingerprint({
+      title: project.title,
+      shortPitch: project.shortPitch,
+      description: project.description,
+      executionPlan: project.executionPlan,
+      category: project.category,
+      ownerId: project.owner
+    })
+    project.security = {
+      ...(project.security || {}),
+      ideaFingerprint: updatedFingerprint,
+      fingerprintAlgorithm: 'sha256',
+      fingerprintVersion: 1,
+      fingerprintedAt: new Date()
     }
 
     await project.save()
@@ -1023,6 +1165,78 @@ exports.deleteProjectFile = async (req, res) => {
   } catch (error) {
     console.error('Delete file error:', error)
     res.status(500).json({ message: 'Failed to remove file' })
+  }
+}
+
+exports.downloadProjectFile = async (req, res) => {
+  try {
+    const { id, fileId } = req.params
+    const { exp, sig } = req.query
+    const viewerId = req.user?.userId ? req.user.userId.toString() : ''
+
+    if (!viewerId) {
+      return res.status(401).json({ message: 'Unauthorized' })
+    }
+
+    if (!verifyFileSignature({ projectId: id, fileId, userId: viewerId, expiresAt: exp, sig })) {
+      logSecurityEvent('file_access_denied', req, {
+        projectId: id,
+        fileId,
+        reason: 'invalid_signature'
+      })
+      return res.status(403).json({ message: 'File link expired or invalid. Refresh and try again.' })
+    }
+
+    const project = await Project.findById(id)
+    if (!project) {
+      return res.status(404).json({ message: 'Project not found' })
+    }
+
+    const isOwner = toId(project.owner) === viewerId
+    const isTeamMember = isViewerTeamMember(project, viewerId)
+    const fileInProject = (project.files || []).find(
+      (file) => toId(file._id) === fileId || file.filename === fileId
+    )
+    const fileInValidation = (project.validation?.sharedFiles || []).find(
+      (file) => toId(file._id) === fileId || file.filename === fileId
+    )
+    const file = fileInProject || fileInValidation
+
+    if (!file) {
+      return res.status(404).json({ message: 'File not found' })
+    }
+
+    const validationVisible = ['validation', 'validated', 'validation_failed'].includes(project.status)
+    const canAccessAsValidator = Boolean(fileInValidation && validationVisible)
+    if (!isOwner && !isTeamMember && !canAccessAsValidator) {
+      logSecurityEvent('file_access_denied', req, {
+        projectId: id,
+        fileId,
+        reason: 'insufficient_access'
+      })
+      return res.status(403).json({ message: 'You do not have permission to access this file' })
+    }
+
+    const safeFilename = path.basename(file.filename || '')
+    if (!safeFilename) {
+      return res.status(404).json({ message: 'File not found' })
+    }
+
+    const absolutePath = path.join(__dirname, '..', 'uploads', safeFilename)
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ message: 'File missing on server' })
+    }
+
+    logSecurityEvent('file_download', req, {
+      projectId: id,
+      fileId,
+      source: fileInProject ? 'project_files' : 'validation_shared_files'
+    })
+
+    res.download(absolutePath, file.originalName || safeFilename)
+  } catch (error) {
+    console.error('Download file error:', error)
+    res.status(500).json({ message: 'Failed to download file' })
   }
 }
 
