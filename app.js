@@ -136,6 +136,11 @@ const validationRoutes = require('./routes/validationRoutes')
 app.use('/validations', protect, validationRoutes)
 app.use('/api/validations', protect, validationRoutes)
 
+// Sprint routes (protected)
+const sprintRoutes = require('./routes/sprintRoutes')
+app.use('/sprint', protect, sprintRoutes)
+app.use('/api/sprint', protect, sprintRoutes)
+
 app.use(notFound)
 app.use(errorHandler)
 

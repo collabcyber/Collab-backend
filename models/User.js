@@ -7,6 +7,11 @@ const UserSchema = new mongoose.Schema({
   authProvider: { type: String, enum: ['local', 'google'], default: 'local' },
   googleId: { type: String, unique: true, sparse: true },
   role: { type: String, default: 'user' },
+  sprintStatus: {
+    type: String,
+    enum: ['none', 'applied', 'active', 'completed'],
+    default: 'none'
+  },
   emailVerified: { type: Boolean, default: false },
   emailVerificationOTP: { type: String, select: false },
   emailVerificationOTPHash: { type: String, select: false },

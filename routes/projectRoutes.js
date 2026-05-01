@@ -32,6 +32,7 @@ const {
 } = require('../controllers/projectController')
 const validate = require('../middleware/validate')
 const { requireProjectOwner, requireTeamMember } = require('../middleware/projectAuth')
+const { checkSprintActive } = require('../middleware/checkSprintActive')
 const { project, objectId, projectsQuery, paginationQuery, emptyBody } = require('../validators')
 
 const uploadsDir = path.join(__dirname, '..', 'uploads')
@@ -50,7 +51,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } })
 
 // Basic CRUD
-router.post('/', validate(project.createProjectBody), createProject)
+router.post('/', checkSprintActive, validate(project.createProjectBody), createProject)
 router.get('/', validate(z.object({ query: projectsQuery })), getProjects)
 router.get('/options', validate(emptyBody), getProjectOptions)
 router.get('/validation', validate(z.object({ query: paginationQuery.passthrough() })), getValidationProjects)

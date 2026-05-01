@@ -242,6 +242,12 @@ const adminUpdateUserBody = z.object({
   showContactToTeam: z.union([z.boolean(), z.string()]).optional()
 }).passthrough()
 
+const sprintApplyBody = z.object({}).strict()
+
+const sprintStatusUpdateBody = z.object({
+  status: z.enum(['active']).optional()
+}).passthrough()
+
 module.exports = {
   objectId,
   emptyBody,
@@ -282,5 +288,9 @@ module.exports = {
     startValidationBody,
     retryValidationBody,
     markHelpfulBody
+  },
+  sprint: {
+    sprintApplyBody,
+    sprintStatusUpdateBody
   }
 }
