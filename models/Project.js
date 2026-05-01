@@ -68,6 +68,11 @@ const ProjectSchema = new mongoose.Schema({
     enum: ['planning', 'building', 'completed', 'validation', 'validated', 'validation_failed', 'archived'],
     default: 'planning'
   },
+  phase: {
+    type: String,
+    enum: ['problem', 'plan', 'build', 'mvp', 'validation', 'demo'],
+    default: 'problem'
+  },
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   interestedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   teamMembers: [{ 

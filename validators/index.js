@@ -248,6 +248,19 @@ const sprintStatusUpdateBody = z.object({
   status: z.enum(['active']).optional()
 }).passthrough()
 
+const checkpointPhase = z.enum(['problem', 'plan', 'build', 'mvp', 'validation', 'demo'])
+
+const checkpointSubmitBody = z.object({
+  projectId: objectId,
+  phase: checkpointPhase,
+  submissionLink: z.string().url(),
+  description: z.string().max(2000).optional()
+}).passthrough()
+
+const checkpointProjectParams = z.object({
+  projectId: objectId
+})
+
 module.exports = {
   objectId,
   emptyBody,
@@ -292,5 +305,9 @@ module.exports = {
   sprint: {
     sprintApplyBody,
     sprintStatusUpdateBody
+  },
+  checkpoint: {
+    checkpointSubmitBody,
+    checkpointProjectParams
   }
 }
