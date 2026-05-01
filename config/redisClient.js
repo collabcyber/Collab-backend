@@ -2,14 +2,45 @@ const { createClient } = require('redis')
 
 let redisClient = null
 
+function buildRedisUrlFromParts() {
+  const host = process.env.REDISHOST
+  const port = process.env.REDISPORT || '6379'
+  if (!host) return null
+
+  const user = process.env.REDISUSER || 'default'
+  const password = process.env.REDISPASSWORD
+
+  if (!password) {
+    return `redis://${host}:${port}`
+  }
+
+  return `redis://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}`
+}
+
+function resolveRedisUrl() {
+  const directUrl =
+    process.env.REDIS_URL ||
+    process.env.REDIS_PRIVATE_URL ||
+    process.env.REDIS_PUBLIC_URL ||
+    process.env.REDIS_TLS_URL
+
+  if (directUrl && directUrl.trim()) {
+    return directUrl.trim()
+  }
+
+  return buildRedisUrlFromParts()
+}
+
 async function initRedis() {
   if (redisClient && redisClient.isOpen) {
     return redisClient
   }
 
-  const redisUrl = process.env.REDIS_URL
+  const redisUrl = resolveRedisUrl()
   if (!redisUrl) {
-    throw new Error('REDIS_URL is required')
+    throw new Error(
+      'Redis is not configured. Set REDIS_URL (or REDIS_PRIVATE_URL / REDIS_PUBLIC_URL), or REDISHOST/REDISPORT/REDISPASSWORD.'
+    )
   }
 
   redisClient = createClient({
