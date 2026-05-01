@@ -3,6 +3,7 @@ const path = require('path')
 const crypto = require('crypto')
 const mongoose = require('mongoose')
 const Project = require('../models/Project')
+const Checkpoint = require('../models/Checkpoint')
 const User = require('../models/User')
 const { createNotification } = require('./notificationController')
 const { applyUserStats, POINTS, computeBadges } = require('../utils/points')
@@ -12,6 +13,11 @@ const { generateValidationCertificates, buildVerificationUrl } = require('../ser
 const { logSecurityEvent } = require('../middleware/securityLogger')
 
 const toId = (value) => (value ? value.toString() : '')
+const SPRINT_PHASES = ['problem', 'plan', 'build', 'mvp', 'validation', 'demo']
+const SPRINT_PHASE_INDEX = SPRINT_PHASES.reduce((acc, phase, index) => {
+  acc[phase] = index
+  return acc
+}, {})
 const FILE_LINK_TTL_SECONDS = Math.max(60, parseInt(process.env.FILE_LINK_TTL_SECONDS || '900', 10) || 900)
 const FILE_ACCESS_SECRET = process.env.FILE_ACCESS_SECRET || process.env.JWT_SECRET || 'collab-file-access-secret'
 const PUBLIC_API_BASE = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
@@ -483,6 +489,68 @@ exports.getProjectById = async (req, res) => {
   } catch (error) {
     console.error('Get project error:', error)
     res.status(500).json({ message: 'Failed to fetch project' })
+  }
+}
+
+exports.getProjectProof = async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const project = await Project.findById(id)
+      .select('title shortPitch description phase status teamMembers owner')
+      .populate('owner', 'name')
+      .populate('teamMembers', 'name')
+      .lean()
+
+    if (!project) {
+      return res.status(404).json({ message: 'Project not found' })
+    }
+
+    const checkpoints = await Checkpoint.find({ projectId: id })
+      .select('phase submissionLink description submittedAt')
+      .lean()
+
+    checkpoints.sort((a, b) => {
+      const phaseDiff = (SPRINT_PHASE_INDEX[a.phase] ?? Number.MAX_SAFE_INTEGER) - (SPRINT_PHASE_INDEX[b.phase] ?? Number.MAX_SAFE_INTEGER)
+      if (phaseDiff !== 0) return phaseDiff
+      return new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime()
+    })
+
+    const membersMap = new Map()
+    const ownerId = toId(project.owner?._id || project.owner)
+    const ownerName = project.owner?.name || 'Owner'
+    if (ownerId) {
+      membersMap.set(ownerId, ownerName)
+    }
+
+    ;(project.teamMembers || []).forEach((member) => {
+      const memberId = toId(member?._id || member)
+      if (!memberId) return
+      if (!membersMap.has(memberId)) {
+        membersMap.set(memberId, member?.name || 'Team Member')
+      }
+    })
+
+    const phaseStatus = SPRINT_PHASES.includes(project.phase) ? project.phase : 'problem'
+    const completed = phaseStatus === 'demo' && ['validated', 'completed'].includes(String(project.status || '').toLowerCase())
+
+    return res.json({
+      id: project._id,
+      title: project.title,
+      description: project.shortPitch || project.description || '',
+      teamMembers: Array.from(membersMap.values()),
+      checkpoints: checkpoints.map((checkpoint) => ({
+        phase: checkpoint.phase,
+        submissionLink: checkpoint.submissionLink,
+        description: checkpoint.description || '',
+        submittedAt: checkpoint.submittedAt
+      })),
+      finalPhaseStatus: completed ? 'completed' : 'in_progress',
+      currentPhase: phaseStatus
+    })
+  } catch (error) {
+    console.error('Get project proof error:', error)
+    return res.status(500).json({ message: 'Failed to load project proof' })
   }
 }
 

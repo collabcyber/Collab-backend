@@ -116,6 +116,11 @@ const publicRoutes = require('./routes/publicRoutes')
 app.use('/public', publicRoutes)
 app.use('/api/public', publicRoutes)
 
+// Public project routes
+const projectPublicRoutes = require('./routes/projectPublicRoutes')
+app.use('/projects', projectPublicRoutes)
+app.use('/api/projects', projectPublicRoutes)
+
 // Project routes (protected)
 const projectRoutes = require('./routes/projectRoutes')
 app.use('/projects', protect, projectRoutes)
