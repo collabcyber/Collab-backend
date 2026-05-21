@@ -136,11 +136,6 @@ const notificationRoutes = require('./routes/notificationRoutes')
 app.use('/notifications', protect, notificationRoutes)
 app.use('/api/notifications', protect, notificationRoutes)
 
-// Validation routes (protected)
-const validationRoutes = require('./routes/validationRoutes')
-app.use('/validations', protect, validationRoutes)
-app.use('/api/validations', protect, validationRoutes)
-
 // Sprint routes (protected)
 const sprintRoutes = require('./routes/sprintRoutes')
 app.use('/sprint', protect, sprintRoutes)

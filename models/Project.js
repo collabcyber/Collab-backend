@@ -96,6 +96,33 @@ const ProjectSchema = new mongoose.Schema({
   
   // Validation System
   validation: {
+    workspace: {
+      problemStatement: { type: String, default: '' },
+      targetUsers: { type: String, default: '' },
+      coreAssumptions: [{ type: String }],
+      tasks: [{
+        taskId: { type: String, required: true },
+        title: { type: String, required: true },
+        status: { type: String, enum: ['pending', 'completed'], default: 'pending' },
+        dueDate: { type: Date },
+        updatedAt: { type: Date, default: Date.now },
+        completedAt: { type: Date }
+      }],
+      evidence: [{
+        evidenceId: { type: String, required: true },
+        kind: {
+          type: String,
+          enum: ['survey', 'interview', 'waitlist', 'feedback', 'experiment', 'insight', 'other'],
+          default: 'other'
+        },
+        title: { type: String, required: true },
+        summary: { type: String, default: '' },
+        link: { type: String, default: '' },
+        createdAt: { type: Date, default: Date.now }
+      }],
+      confidenceScore: { type: Number, min: 0, max: 100, default: 0 },
+      lastFeedbackAt: { type: Date }
+    },
     reviewsRequired: { type: Number, default: 30 },
     currentReviews: { type: Number, default: 0 },
     averageRating: { type: Number, default: 0 },

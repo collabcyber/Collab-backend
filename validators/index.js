@@ -150,6 +150,32 @@ const updateProjectDetailsBody = z.object({
   executionPlan: optionalString
 }).passthrough()
 
+const updateValidationWorkspaceBody = z.object({
+  problemStatement: optionalString,
+  targetUsers: optionalString,
+  coreAssumptions: z.union([z.array(z.string()), z.string()]).optional(),
+  confidenceScore: z.union([z.number(), z.string()]).optional(),
+  validationTasks: z.array(
+    z.object({
+      taskId: optionalString,
+      title: optionalString,
+      status: optionalString,
+      dueDate: optionalString,
+      completedAt: optionalString
+    }).passthrough()
+  ).optional(),
+  validationEvidence: z.array(
+    z.object({
+      evidenceId: optionalString,
+      kind: optionalString,
+      title: optionalString,
+      summary: optionalString,
+      link: optionalString,
+      createdAt: optionalString
+    }).passthrough()
+  ).optional()
+}).passthrough()
+
 const updateProjectRequirementsBody = z.object({
   rolesNeeded: z.union([z.array(z.string()), z.string()]).optional(),
   skillsRequired: z.union([z.array(z.string()), z.string()]).optional(),
@@ -301,6 +327,7 @@ module.exports = {
   project: {
     createProjectBody,
     updateProjectDetailsBody,
+    updateValidationWorkspaceBody,
     updateProjectRequirementsBody,
     joinRequestBody,
     respondRequestBody,

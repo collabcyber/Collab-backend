@@ -91,6 +91,99 @@ const normalizeLabelList = (items) => {
   return [...new Set(normalized)]
 }
 
+const normalizePlainText = (value, maxLength = 500) => {
+  if (typeof value !== 'string') return ''
+  return value.trim().slice(0, maxLength)
+}
+
+const normalizeLongText = (value, maxLength = 3000) => {
+  if (typeof value !== 'string') return ''
+  return value.trim().slice(0, maxLength)
+}
+
+const normalizeValidationAssumptions = (items) => {
+  const list = Array.isArray(items) ? items : items ? [items] : []
+  const normalized = list
+    .map((item) => normalizeLongText(typeof item === 'string' ? item : String(item), 300))
+    .filter(Boolean)
+  return [...new Set(normalized)].slice(0, 30)
+}
+
+const normalizeValidationTasks = (items) => {
+  const list = Array.isArray(items) ? items : []
+
+  return list
+    .map((item) => {
+      if (typeof item === 'string') {
+        return {
+          taskId: new mongoose.Types.ObjectId().toString(),
+          title: normalizePlainText(item, 180),
+          status: 'pending',
+          dueDate: undefined,
+          updatedAt: new Date(),
+          completedAt: undefined
+        }
+      }
+
+      const title = normalizePlainText(item?.title || '', 180)
+      if (!title) return null
+
+      const status = item?.status === 'completed' ? 'completed' : 'pending'
+      const dueDate = item?.dueDate ? new Date(item.dueDate) : undefined
+      const completedAt = status === 'completed'
+        ? (item?.completedAt ? new Date(item.completedAt) : new Date())
+        : undefined
+
+      return {
+        taskId: item?.taskId || new mongoose.Types.ObjectId().toString(),
+        title,
+        status,
+        dueDate: dueDate && !Number.isNaN(dueDate.getTime()) ? dueDate : undefined,
+        updatedAt: new Date(),
+        completedAt
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 100)
+}
+
+const VALIDATION_EVIDENCE_KINDS = new Set([
+  'survey',
+  'interview',
+  'waitlist',
+  'feedback',
+  'experiment',
+  'insight',
+  'other'
+])
+
+const normalizeValidationEvidence = (items) => {
+  const list = Array.isArray(items) ? items : []
+
+  return list
+    .map((item) => {
+      if (!item) return null
+
+      const title = normalizePlainText(item?.title || '', 180)
+      if (!title) return null
+
+      const kind = VALIDATION_EVIDENCE_KINDS.has(item?.kind) ? item.kind : 'other'
+      const summary = normalizeLongText(item?.summary || '', 1500)
+      const link = normalizePlainText(item?.link || '', 1000)
+
+      return {
+        evidenceId: item?.evidenceId || new mongoose.Types.ObjectId().toString(),
+        kind,
+        title,
+        summary,
+        link,
+        createdAt: item?.createdAt ? new Date(item.createdAt) : new Date()
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 300)
+}
+
 const isViewerTeamMember = (project, viewerId) => {
   if (!viewerId) return false
   return (project.teamMembers || []).some((member) => toId(member._id || member) === viewerId)
@@ -123,10 +216,10 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
   }
 
   if (!isPrivilegedViewer) {
-    project.teamMembers = (project.teamMembers || []).map((member) => ({
-      _id: member._id,
-      name: member.name || 'Member'
-    }))
+      project.teamMembers = (project.teamMembers || []).map((member) => ({
+        _id: member._id,
+        name: member.name || 'Contributor'
+      }))
 
     // Keep external view focused on a public summary, not the implementation details.
     project.executionPlan = undefined
@@ -292,12 +385,12 @@ exports.createProject = async (req, res) => {
     const populatedProject = await Project.findById(project._id).populate('owner', 'name email')
 
     res.status(201).json({
-      message: 'Project created successfully',
+      message: 'Venture created successfully',
       project: populatedProject
     })
   } catch (error) {
-    console.error('Create project error:', error)
-    res.status(500).json({ message: 'Failed to create project' })
+    console.error('Create venture error:', error)
+    res.status(500).json({ message: 'Failed to create venture' })
   }
 }
 
@@ -368,7 +461,7 @@ exports.getProjects = async (req, res) => {
         .skip((parsedPage - 1) * parsedLimit)
     } catch (populateError) {
       if (populateError?.name === 'CastError' && populateError?.path === 'college') {
-        console.warn('Project college populate failed, falling back without college populate.')
+        console.warn('Venture college populate failed, falling back without college populate.')
         projects = await Project.find(filter)
           .populate('owner', 'name')
           .sort({ createdAt: -1 })
@@ -392,8 +485,8 @@ exports.getProjects = async (req, res) => {
       }
     })
   } catch (error) {
-    console.error('Get projects error:', error)
-    res.status(500).json({ message: 'Failed to fetch projects' })
+    console.error('Get ventures error:', error)
+    res.status(500).json({ message: 'Failed to fetch ventures' })
   }
 }
 
@@ -423,8 +516,8 @@ exports.getValidationProjects = async (req, res) => {
       }
     })
   } catch (error) {
-    console.error('Get validation projects error:', error)
-    res.status(500).json({ message: 'Failed to fetch validation projects' })
+    console.error('Get validation ventures error:', error)
+    res.status(500).json({ message: 'Failed to fetch validation ventures' })
   }
 }
 
@@ -440,8 +533,8 @@ exports.getProjectOptions = async (req, res) => {
 
     res.json({ roles: normalizedRoles, skills: normalizedSkills })
   } catch (error) {
-    console.error('Get project options error:', error)
-    res.status(500).json({ message: 'Failed to fetch project options' })
+    console.error('Get venture options error:', error)
+    res.status(500).json({ message: 'Failed to fetch venture options' })
   }
 }
 
@@ -460,14 +553,14 @@ exports.getProjectById = async (req, res) => {
       .populate('validation.reviews.reviewer', 'name')
 
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const isOwner = toId(project.owner?._id) === viewerId
     const isTeamMember = isViewerTeamMember(project, viewerId) || isOwner
 
     if (project.visibility === 'private' && !isOwner && !isTeamMember) {
-      return res.status(403).json({ message: 'This project is visible only to the project team' })
+      return res.status(403).json({ message: 'This venture is visible only to the venture team' })
     }
 
     if (project.visibility === 'college' && !isOwner && !isTeamMember) {
@@ -475,7 +568,7 @@ exports.getProjectById = async (req, res) => {
       const viewerCollege = (viewer?.college || viewer?.college_id) ? (viewer.college || viewer.college_id).toString() : null
       const projectCollege = project.college ? project.college.toString() : null
       if (viewerCollege && projectCollege && viewerCollege !== projectCollege) {
-        return res.status(403).json({ message: 'This project is visible to its college only' })
+        return res.status(403).json({ message: 'This venture is visible to its college only' })
       }
     }
 
@@ -487,8 +580,8 @@ exports.getProjectById = async (req, res) => {
 
     res.json(sanitized)
   } catch (error) {
-    console.error('Get project error:', error)
-    res.status(500).json({ message: 'Failed to fetch project' })
+    console.error('Get venture error:', error)
+    res.status(500).json({ message: 'Failed to fetch venture' })
   }
 }
 
@@ -503,7 +596,7 @@ exports.getProjectProof = async (req, res) => {
       .lean()
 
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const checkpoints = await Checkpoint.find({ projectId: id })
@@ -527,7 +620,7 @@ exports.getProjectProof = async (req, res) => {
       const memberId = toId(member?._id || member)
       if (!memberId) return
       if (!membersMap.has(memberId)) {
-        membersMap.set(memberId, member?.name || 'Team Member')
+        membersMap.set(memberId, member?.name || 'Team Contributor')
       }
     })
 
@@ -549,8 +642,8 @@ exports.getProjectProof = async (req, res) => {
       currentPhase: phaseStatus
     })
   } catch (error) {
-    console.error('Get project proof error:', error)
-    return res.status(500).json({ message: 'Failed to load project proof' })
+    console.error('Get venture proof error:', error)
+    return res.status(500).json({ message: 'Failed to load venture proof' })
   }
 }
 
@@ -561,7 +654,7 @@ exports.joinProject = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const maxTeamMembers = project.numberOfTeammates || 0
@@ -586,11 +679,11 @@ exports.joinProject = async (req, res) => {
     const team = (project.teamMembers || []).map((uid) => uid.toString())
 
     if (project.owner?.toString() === userIdString) {
-      return res.status(400).json({ message: 'Owner cannot join their own project' })
+      return res.status(400).json({ message: 'Owner cannot join their own venture' })
     }
 
     if (team.includes(userIdString)) {
-      return res.status(400).json({ message: 'Already a team member' })
+      return res.status(400).json({ message: 'Already a team contributor' })
     }
 
     if (interested.includes(userIdString)) {
@@ -616,8 +709,8 @@ exports.joinProject = async (req, res) => {
 
     res.json({ message: 'Join request sent successfully' })
   } catch (error) {
-    console.error('Join project error:', error)
-    res.status(500).json({ message: 'Failed to join project' })
+    console.error('Join venture error:', error)
+    res.status(500).json({ message: 'Failed to join venture' })
   }
 }
 
@@ -633,11 +726,11 @@ exports.respondToJoinRequest = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only project owner can respond to requests' })
+      return res.status(403).json({ message: 'Only venture owner can respond to requests' })
     }
 
     if (!['accept', 'reject'].includes(action)) {
@@ -688,7 +781,7 @@ exports.addTeamMember = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const maxTeamMembers = project.numberOfTeammates || 0
@@ -699,7 +792,7 @@ exports.addTeamMember = async (req, res) => {
     }
 
     if (project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only project owner can add team members' })
+      return res.status(403).json({ message: 'Only venture owner can add team contributors' })
     }
 
     const interested = (project.interestedUsers || []).map((uid) => uid.toString())
@@ -776,10 +869,10 @@ exports.addTeamMember = async (req, res) => {
       .populate('validation.sharedFiles.uploadedBy', 'name email')
       .populate('validation.reviews.reviewer', 'name')
 
-    res.json({ message: 'Member added', project: populated })
+    res.json({ message: 'Contributor added', project: populated })
   } catch (error) {
-    console.error('Error adding team member:', error)
-    res.status(500).json({ message: 'Failed to add team member' })
+    console.error('Error adding team contributor:', error)
+    res.status(500).json({ message: 'Failed to add team contributor' })
   }
 }
 
@@ -795,11 +888,11 @@ exports.updateProjectRequirements = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can update requirements' })
+      return res.status(403).json({ message: 'Only the venture owner can update requirements' })
     }
 
     const nextTeamSize = Number.isFinite(Number(numberOfTeammates))
@@ -812,7 +905,7 @@ exports.updateProjectRequirements = async (req, res) => {
     }
 
     if (nextTeamSize < currentTeamCount) {
-      return res.status(400).json({ message: 'Team size cannot be less than current members' })
+      return res.status(400).json({ message: 'Team size cannot be less than current contributors' })
     }
 
     if (typeof numberOfTeammates !== 'undefined') {
@@ -838,10 +931,10 @@ exports.updateProjectRequirements = async (req, res) => {
       .populate('teamMembers', 'name email')
       .populate('interestedUsers', 'name email')
 
-    res.json({ message: 'Project requirements updated', project: populated })
+    res.json({ message: 'Venture requirements updated', project: populated })
   } catch (error) {
-    console.error('Update project requirements error:', error)
-    res.status(500).json({ message: 'Failed to update project requirements' })
+    console.error('Update venture requirements error:', error)
+    res.status(500).json({ message: 'Failed to update venture requirements' })
   }
 }
 
@@ -857,11 +950,11 @@ exports.updateProjectDetails = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can update details' })
+      return res.status(403).json({ message: 'Only the venture owner can update details' })
     }
 
     if (typeof title === 'string') {
@@ -923,10 +1016,118 @@ exports.updateProjectDetails = async (req, res) => {
       .populate('teamMembers', 'name email')
       .populate('interestedUsers', 'name email')
 
-    res.json({ message: 'Project details updated', project: populated })
+    res.json({ message: 'Venture details updated', project: populated })
   } catch (error) {
-    console.error('Update project details error:', error)
-    res.status(500).json({ message: 'Failed to update project details' })
+    console.error('Update venture details error:', error)
+    res.status(500).json({ message: 'Failed to update venture details' })
+  }
+}
+
+exports.updateValidationWorkspace = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const {
+      problemStatement,
+      targetUsers,
+      coreAssumptions,
+      validationTasks,
+      validationEvidence,
+      confidenceScore
+    } = req.body
+
+    if (!requesterId) {
+      return res.status(401).json({ message: 'Unauthorized' })
+    }
+
+    const project = await Project.findById(id)
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+
+    const requesterIdString = requesterId.toString()
+    const isOwner = toId(project.owner) === requesterIdString
+    const isTeamMember = (project.teamMembers || []).some((memberId) => toId(memberId) === requesterIdString)
+    if (!isOwner && !isTeamMember) {
+      return res.status(403).json({ message: 'Only venture contributors can update validation workspace' })
+    }
+
+    if (!project.validation) {
+      project.validation = {}
+    }
+    if (!project.validation.workspace) {
+      project.validation.workspace = {}
+    }
+
+    if (typeof problemStatement !== 'undefined') {
+      project.validation.workspace.problemStatement = normalizeLongText(problemStatement, 3000)
+    }
+
+    if (typeof targetUsers !== 'undefined') {
+      project.validation.workspace.targetUsers = normalizeLongText(targetUsers, 3000)
+    }
+
+    if (typeof coreAssumptions !== 'undefined') {
+      project.validation.workspace.coreAssumptions = normalizeValidationAssumptions(coreAssumptions)
+    }
+
+    if (typeof validationTasks !== 'undefined') {
+      project.validation.workspace.tasks = normalizeValidationTasks(validationTasks)
+    }
+
+    if (typeof validationEvidence !== 'undefined') {
+      project.validation.workspace.evidence = normalizeValidationEvidence(validationEvidence)
+      project.validation.workspace.lastFeedbackAt = new Date()
+    }
+
+    if (typeof confidenceScore !== 'undefined') {
+      const numeric = Number(confidenceScore)
+      if (Number.isFinite(numeric)) {
+        project.validation.workspace.confidenceScore = Math.max(0, Math.min(100, Math.round(numeric)))
+      }
+    }
+
+    await project.save()
+
+    const workspace = project.validation.workspace || {}
+    const tasks = workspace.tasks || []
+    const evidence = workspace.evidence || []
+    const completedTasks = tasks.filter((task) => task.status === 'completed').length
+    const pendingTasks = Math.max(0, tasks.length - completedTasks)
+
+    const timeline = [
+      ...tasks.map((task) => ({
+        type: 'task',
+        status: task.status,
+        title: task.title,
+        at: task.updatedAt || task.completedAt || task.dueDate || project.updatedAt
+      })),
+      ...evidence.map((item) => ({
+        type: 'evidence',
+        status: 'logged',
+        title: item.title,
+        at: item.createdAt || project.updatedAt
+      }))
+    ]
+      .filter((entry) => entry.at)
+      .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+      .slice(0, 50)
+
+    return res.json({
+      message: 'Validation workspace updated',
+      workspace,
+      summary: {
+        completedTasks,
+        pendingTasks,
+        totalTasks: tasks.length,
+        confidenceScore: workspace.confidenceScore || 0,
+        evidenceCount: evidence.length
+      },
+      timeline
+    })
+  } catch (error) {
+    console.error('Update validation workspace error:', error)
+    res.status(500).json({ message: 'Failed to update validation workspace' })
   }
 }
 
@@ -942,20 +1143,20 @@ exports.removeTeamMember = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only project owner can remove team members' })
+      return res.status(403).json({ message: 'Only venture owner can remove team contributors' })
     }
 
     if (project.owner.toString() === userId.toString()) {
-      return res.status(400).json({ message: 'Project owner cannot be removed' })
+      return res.status(400).json({ message: 'Venture owner cannot be removed' })
     }
 
     const team = (project.teamMembers || []).map((uid) => uid.toString())
     if (!team.includes(userId.toString())) {
-      return res.status(400).json({ message: 'User is not a team member' })
+      return res.status(400).json({ message: 'User is not a team contributor' })
     }
 
     project.teamMembers = project.teamMembers.filter((uid) => uid.toString() !== userId.toString())
@@ -970,10 +1171,10 @@ exports.removeTeamMember = async (req, res) => {
       .populate('validation.sharedFiles.uploadedBy', 'name email')
       .populate('validation.reviews.reviewer', 'name')
 
-    res.json({ message: 'Member removed', project: populated })
+    res.json({ message: 'Contributor removed', project: populated })
   } catch (error) {
-    console.error('Error removing team member:', error)
-    res.status(500).json({ message: 'Failed to remove team member' })
+    console.error('Error removing team contributor:', error)
+    res.status(500).json({ message: 'Failed to remove team contributor' })
   }
 }
 
@@ -989,7 +1190,7 @@ exports.addProjectMessage = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const userIdString = userId.toString()
@@ -997,7 +1198,7 @@ exports.addProjectMessage = async (req, res) => {
     const isOwner = project.owner.toString() === userIdString
 
     if (!isOwner && !team.includes(userIdString)) {
-      return res.status(403).json({ message: 'Only team members can post messages' })
+      return res.status(403).json({ message: 'Only team contributors can build update messages' })
     }
 
     project.messages.push({ sender: userId, text: text.trim() })
@@ -1059,12 +1260,12 @@ exports.updateActivity = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const isTeamMember = isViewerTeamMember(project, userId.toString()) || toId(project.owner) === userId.toString()
     if (!isTeamMember) {
-      return res.status(403).json({ message: 'Only team members can update activity' })
+      return res.status(403).json({ message: 'Only team contributors can update activity' })
     }
 
     project.buildPhase.lastActivity = new Date()
@@ -1084,11 +1285,11 @@ exports.deleteProject = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can delete this project' })
+      return res.status(403).json({ message: 'Only the venture owner can delete this venture' })
     }
 
     const ownerId = project.owner.toString()
@@ -1118,10 +1319,10 @@ exports.deleteProject = async (req, res) => {
 
     await Project.deleteOne({ _id: id })
 
-    res.json({ message: 'Project deleted successfully' })
+    res.json({ message: 'Venture deleted successfully' })
   } catch (error) {
-    console.error('Delete project error:', error)
-    res.status(500).json({ message: 'Failed to delete project' })
+    console.error('Delete venture error:', error)
+    res.status(500).json({ message: 'Failed to delete venture' })
   }
 }
 
@@ -1136,7 +1337,7 @@ exports.addProjectFile = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const userIdString = userId.toString()
@@ -1144,7 +1345,7 @@ exports.addProjectFile = async (req, res) => {
     const isOwner = project.owner.toString() === userIdString
 
     if (!isOwner && !team.includes(userIdString)) {
-      return res.status(403).json({ message: 'Only team members can upload files' })
+      return res.status(403).json({ message: 'Only team contributors can upload files' })
     }
 
     project.files.push({
@@ -1181,7 +1382,7 @@ exports.deleteProjectFile = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const userIdString = userId.toString()
@@ -1189,7 +1390,7 @@ exports.deleteProjectFile = async (req, res) => {
     const isOwner = project.owner.toString() === userIdString
 
     if (!isOwner && !team.includes(userIdString)) {
-      return res.status(403).json({ message: 'Only team members can remove files' })
+      return res.status(403).json({ message: 'Only team contributors can remove files' })
     }
 
     const fileIndex = (project.files || []).findIndex(
@@ -1257,7 +1458,7 @@ exports.downloadProjectFile = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     const isOwner = toId(project.owner) === viewerId
@@ -1315,11 +1516,11 @@ exports.startBuildPhase = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can start the build phase' })
+      return res.status(403).json({ message: 'Only the venture owner can start the build phase' })
     }
 
     project.status = 'building'
@@ -1351,24 +1552,24 @@ exports.completeProject = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can complete the project' })
+      return res.status(403).json({ message: 'Only the venture owner can complete the venture' })
     }
 
     if (project.status === 'validated') {
-      return res.status(400).json({ message: 'Project is already validated' })
+      return res.status(400).json({ message: 'Venture is already validated' })
     }
 
     // Completion is now tied to successful validation.
     res.status(400).json({
-      message: 'Projects are marked complete only after passing validation. Use "Validate Project" from Team Workspace.'
+      message: 'Ventures are marked complete only after passing validation. Use "Validate Venture" from Team Workspace.'
     })
   } catch (error) {
-    console.error('Complete project error:', error)
-    res.status(500).json({ message: 'Failed to complete project' })
+    console.error('Complete venture error:', error)
+    res.status(500).json({ message: 'Failed to complete venture' })
   }
 }
 
@@ -1380,11 +1581,11 @@ exports.startValidation = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can validate' })
+      return res.status(403).json({ message: 'Only the venture owner can validate' })
     }
 
     const maxTeamMembers = project.numberOfTeammates || 0
@@ -1403,17 +1604,17 @@ exports.startValidation = async (req, res) => {
     }
 
     if (project.status === 'validation' || project.status === 'validated') {
-      return res.status(400).json({ message: 'Project already in validation' })
+      return res.status(400).json({ message: 'Venture already in validation' })
     }
 
     if (project.status === 'validation_failed') {
       return res.status(400).json({
-        message: 'This project needs rework. Use the extend timeline option before sending it to validation again.'
+        message: 'This venture needs rework. Use the extend timeline option before sending it to validation again.'
       })
     }
 
     if (!['building', 'completed'].includes(project.status)) {
-      return res.status(400).json({ message: 'Project must be in build phase before validation' })
+      return res.status(400).json({ message: 'Venture must be in build phase before validation' })
     }
 
     const previousStatus = project.status
@@ -1504,11 +1705,11 @@ exports.startValidation = async (req, res) => {
         const downloadUrl = `${apiBase}${cert.url}`
 
         const subject = 'Your Collab Validation Phase Certificate'
-        const text = `Hi ${member.name || 'there'},\n\nYour project "${project.title}" has entered the Validation phase.\n\nDownload your certificate: ${downloadUrl}\nVerify: ${verifyUrl}\n\n— Collab`
+        const text = `Hi ${member.name || 'there'},\n\nYour venture "${project.title}" has entered the Validation phase.\n\nDownload your certificate: ${downloadUrl}\nVerify: ${verifyUrl}\n\n— Collab`
         const html = `
           <div style="font-family: Arial, sans-serif; line-height:1.6;">
             <p>Hi ${member.name || 'there'},</p>
-            <p>Your project <strong>${project.title}</strong> has entered the <strong>Validation</strong> phase.</p>
+            <p>Your venture <strong>${project.title}</strong> has entered the <strong>Validation</strong> phase.</p>
             <p>You can download your certificate here:</p>
             <p><a href="${downloadUrl}">${downloadUrl}</a></p>
             <p>Verification link:</p>
@@ -1534,7 +1735,7 @@ exports.startValidation = async (req, res) => {
     const failedEmails = emailResults.filter((result) => result.status === 'rejected').length
 
     res.json({
-      message: 'Project sent to validation',
+      message: 'Venture sent to validation',
       project,
       certificateEmails: {
         total: members.length,
@@ -1543,7 +1744,7 @@ exports.startValidation = async (req, res) => {
     })
   } catch (error) {
     console.error('Start validation error:', error)
-    res.status(500).json({ message: 'Failed to send project to validation' })
+    res.status(500).json({ message: 'Failed to send venture to validation' })
   }
 }
 
@@ -1554,15 +1755,15 @@ exports.removeFromValidation = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can update validation status' })
+      return res.status(403).json({ message: 'Only the venture owner can update validation status' })
     }
 
     if (project.status !== 'validation') {
-      return res.status(400).json({ message: 'Project is not in validation' })
+      return res.status(400).json({ message: 'Venture is not in validation' })
     }
 
     const now = Date.now()
@@ -1631,10 +1832,10 @@ exports.removeFromValidation = async (req, res) => {
       .populate('teamMembers', 'name email')
       .populate('interestedUsers', 'name email')
 
-    res.json({ message: 'Project removed from validation', project: populated })
+    res.json({ message: 'Venture removed from validation', project: populated })
   } catch (error) {
     console.error('Remove validation error:', error)
-    res.status(500).json({ message: 'Failed to remove project from validation' })
+    res.status(500).json({ message: 'Failed to remove venture from validation' })
   }
 }
 
@@ -1646,11 +1847,11 @@ exports.extendValidationTimeline = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can extend the timeline' })
+      return res.status(403).json({ message: 'Only the venture owner can extend the timeline' })
     }
 
     if (project.status !== 'validation_failed') {
@@ -1723,12 +1924,12 @@ exports.extendValidationTimeline = async (req, res) => {
       .populate('interestedUsers', 'name email')
 
     res.json({
-      message: 'Project moved back to dashboard with a 7-day extension',
+      message: 'Venture moved back to dashboard with a 7-day extension',
       project: populated
     })
   } catch (error) {
     console.error('Extend validation timeline error:', error)
-    res.status(500).json({ message: 'Failed to extend project timeline' })
+    res.status(500).json({ message: 'Failed to extend venture timeline' })
   }
 }
 
@@ -1744,11 +1945,11 @@ exports.markReviewHelpful = async (req, res) => {
 
     const project = await Project.findById(id)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
     if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the project owner can mark feedback helpful' })
+      return res.status(403).json({ message: 'Only the venture owner can mark feedback helpful' })
     }
 
     const reviews = project.validation?.reviews || []

@@ -27,6 +27,7 @@ const {
   getProjectOptions,
   updateProjectRequirements,
   updateProjectDetails,
+  updateValidationWorkspace,
   removeFromValidation,
   extendValidationTimeline
 } = require('../controllers/projectController')
@@ -59,6 +60,7 @@ router.get('/:id', validate(z.object({ params: z.object({ id: objectId }) })), g
 router.delete('/:id', validate(z.object({ params: z.object({ id: objectId }) })), requireProjectOwner, deleteProject)
 router.put('/:id/details', validate(z.object({ params: z.object({ id: objectId }), body: project.updateProjectDetailsBody })), requireProjectOwner, updateProjectDetails)
 router.put('/:id/requirements', validate(z.object({ params: z.object({ id: objectId }), body: project.updateProjectRequirementsBody })), requireProjectOwner, updateProjectRequirements)
+router.put('/:id/validation/workspace', validate(z.object({ params: z.object({ id: objectId }), body: project.updateValidationWorkspaceBody })), requireTeamMember, updateValidationWorkspace)
 router.post('/:id/validate', validate(z.object({ params: z.object({ id: objectId }), body: project.startValidationBody })), requireProjectOwner, startValidation)
 router.post('/:id/validation/remove', validate(z.object({ params: z.object({ id: objectId }) })), requireProjectOwner, removeFromValidation)
 router.post('/:id/validation/extend', validate(z.object({ params: z.object({ id: objectId }), body: project.retryValidationBody })), requireProjectOwner, extendValidationTimeline)
