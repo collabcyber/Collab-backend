@@ -45,7 +45,7 @@ const MilestoneSchema = new mongoose.Schema({
     blockerId: { type: String, required: true },
     type: {
       type: String,
-      enum: ['technical', 'design', 'validation', 'contributor'],
+      enum: ['technical', 'design', 'validation', 'team', 'contributor'],
       default: 'technical'
     },
     description: { type: String, required: true, trim: true, maxlength: 500 },

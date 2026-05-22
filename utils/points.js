@@ -12,13 +12,13 @@ const POINTS = {
 const computeBadges = (user) => {
   const badges = []
 
-  if ((user.projectsCreated || 0) >= 1) badges.push('🚀 Builder')
-  if ((user.projectsJoined || 0) >= 3) badges.push('🤝 Collaborator')
-  if ((user.validationsGiven || 0) >= 10) badges.push('🧠 Validator')
+  if ((user.projectsCreated || 0) >= 1) badges.push('Startup Workspace Lead')
+  if ((user.projectsJoined || 0) >= 3) badges.push('Reliable Team Member')
+  if ((user.validationsGiven || 0) >= 10) badges.push('Validation Organizer')
   if ((user.inactivePenalties || 0) === 0 && user.lastActive && user.lastActive > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)) {
-    badges.push('🔥 Consistent')
+    badges.push('Consistent Execution')
   }
-  if ((user.points || 0) >= 100) badges.push('🏆 Top Performer')
+  if ((user.projectsCompleted || 0) >= 1) badges.push('Incubation Ready Builder')
 
   return badges
 }

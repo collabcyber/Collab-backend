@@ -140,18 +140,6 @@ const notificationRoutes = require('./routes/notificationRoutes')
 app.use('/notifications', protect, notificationRoutes)
 app.use('/api/notifications', protect, notificationRoutes)
 
-// Sprint routes (protected)
-const sprintRoutes = require('./routes/sprintRoutes')
-app.use('/sprint', protect, sprintRoutes)
-app.use('/api/sprint', protect, sprintRoutes)
-
-// Checkpoint routes (protected)
-const checkpointRoutes = require('./routes/checkpointRoutes')
-app.use('/checkpoint', protect, checkpointRoutes)
-app.use('/api/checkpoint', protect, checkpointRoutes)
-app.use('/checkpoints', protect, checkpointRoutes)
-app.use('/api/checkpoints', protect, checkpointRoutes)
-
 app.use(notFound)
 app.use(errorHandler)
 

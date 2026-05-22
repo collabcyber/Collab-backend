@@ -5,8 +5,6 @@ const {
   getProfile,
   updateProfile,
   changePassword,
-  getLeaderboard,
-  getRank,
   getExecutionProfile,
   getUserProjects,
   getAllUsers,
@@ -19,13 +17,11 @@ const {
 } = require('../controllers/userController')
 const validate = require('../middleware/validate')
 const { requireRole } = require('../middleware/rbac')
-const { user, objectId, userProjectsQuery, leaderboardQuery, activityQuery, paginationQuery, emptyBody } = require('../validators')
+const { user, objectId, userProjectsQuery, activityQuery, paginationQuery, emptyBody } = require('../validators')
 
 router.get('/me', validate(emptyBody), getProfile)
 router.put('/me', validate(user.updateProfileBody), updateProfile)
 router.put('/change-password', validate(user.changePasswordBody), changePassword)
-router.get('/leaderboard', validate(z.object({ query: leaderboardQuery })), getLeaderboard)
-router.get('/rank', validate(emptyBody), getRank)
 router.get('/execution-profile', validate(emptyBody), getExecutionProfile)
 router.get('/projects', validate(z.object({ query: userProjectsQuery })), getUserProjects)
 router.get('/all', requireRole('admin'), validate(z.object({ query: paginationQuery.passthrough() })), getAllUsers)

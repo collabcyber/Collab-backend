@@ -37,11 +37,6 @@ const userProjectsQuery = z.object({
   page: z.string().optional(),
   limit: z.string().optional()
 }).passthrough()
-const leaderboardQuery = z.object({
-  college: optionalString,
-  page: z.string().optional(),
-  limit: z.string().optional()
-}).passthrough()
 const activityQuery = z.object({
   activeWithin: optionalString
 }).passthrough()
@@ -64,7 +59,7 @@ const registerBody = z.object({
   userGoal: optionalString,
   executionRoles: optionalStringList,
   industryInterests: optionalStringList,
-  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
+  commitmentLevel: z.enum(['Exploring', 'Team Member', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const loginBody = z.object({
@@ -127,7 +122,7 @@ const updateProfileBody = z.object({
   userGoal: optionalString,
   executionRoles: optionalStringList,
   industryInterests: optionalStringList,
-  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
+  commitmentLevel: z.enum(['Exploring', 'Team Member', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const changePasswordBody = z.object({
@@ -165,6 +160,11 @@ const updateValidationWorkspaceBody = z.object({
   problemStatement: optionalString,
   targetUsers: optionalString,
   coreAssumptions: z.union([z.array(z.string()), z.string()]).optional(),
+  whoSpokenTo: optionalString,
+  repeatedProblems: optionalString,
+  surprisingInsights: optionalString,
+  useOrPaySignal: optionalString,
+  feedbackChanges: optionalString,
   confidenceScore: z.union([z.number(), z.string()]).optional(),
   validationTasks: z.array(
     z.object({
@@ -250,8 +250,6 @@ const startValidationBody = z.object({
 
 const retryValidationBody = z.object({}).passthrough()
 
-const markHelpfulBody = z.object({})
-
 const adminCreateUserBody = z.object({
   name: text,
   email,
@@ -267,7 +265,7 @@ const adminCreateUserBody = z.object({
   userGoal: optionalString,
   executionRoles: optionalStringList,
   industryInterests: optionalStringList,
-  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
+  commitmentLevel: z.enum(['Exploring', 'Team Member', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const adminUpdateUserBody = z.object({
@@ -284,69 +282,8 @@ const adminUpdateUserBody = z.object({
   userGoal: optionalString,
   executionRoles: optionalStringList,
   industryInterests: optionalStringList,
-  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
+  commitmentLevel: z.enum(['Exploring', 'Team Member', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
-
-const sprintApplyBody = z.object({}).strict()
-
-const sprintStatusUpdateBody = z.object({
-  status: z.enum(['active']).optional()
-}).passthrough()
-
-const checkpointPhase = z.enum(['problem', 'plan', 'build', 'mvp', 'validation', 'demo'])
-
-const checkpointReflection = z.object({
-  questionKey: z.string().min(1).max(120),
-  question: z.string().min(1).max(240),
-  answer: z.string().min(1).max(2000)
-}).passthrough()
-
-const checkpointExecutionEntry = z.object({
-  progressNarrative: z.string().max(2500).optional(),
-  nextMilestone: z.string().max(300).optional(),
-  blockers: z.union([z.array(z.string().max(240)), z.string()]).optional(),
-  evidenceLinks: z.union([z.array(z.string().url()), z.string().url()]).optional(),
-  reflections: z.array(checkpointReflection).min(1).max(20)
-}).passthrough()
-
-const checkpointSubmitBody = z.object({
-  projectId: objectId,
-  phase: checkpointPhase,
-  executionEntry: checkpointExecutionEntry.optional(),
-  submissionLink: z.string().url().optional(),
-  description: z.string().max(2000).optional()
-}).passthrough().refine(
-  (value) => {
-    const hasExecutionEntry = Boolean(value?.executionEntry?.reflections?.length)
-    const hasLegacySubmission = Boolean(value?.submissionLink)
-    return hasExecutionEntry || hasLegacySubmission
-  },
-  {
-    message: 'Checkpoint submission requires structured execution inputs',
-    path: ['executionEntry']
-  }
-)
-
-const checkpointProjectParams = z.object({
-  projectId: objectId
-})
-
-const checkpointUpdateParams = z.object({
-  projectId: objectId,
-  phase: checkpointPhase
-})
-
-const checkpointUpdateBody = z.object({
-  executionEntry: checkpointExecutionEntry.optional(),
-  submissionLink: z.string().url().optional(),
-  description: z.string().max(2000).optional()
-}).passthrough().refine(
-  (value) => Boolean(value?.executionEntry?.reflections?.length || value?.submissionLink),
-  {
-    message: 'Checkpoint update requires structured execution inputs',
-    path: ['executionEntry']
-  }
-)
 
 const milestoneCreateBody = z.object({
   title: z.string().min(1).max(180),
@@ -358,7 +295,7 @@ const milestoneCreateBody = z.object({
   blockers: optionalStringList,
   blockerDetails: z.array(z.object({
     blockerId: optionalString,
-    type: z.enum(['technical', 'design', 'validation', 'contributor']).optional(),
+    type: z.enum(['technical', 'design', 'validation', 'team', 'contributor']).optional(),
     description: z.string().min(1).max(500),
     status: z.enum(['open', 'resolved']).optional(),
     resolvedAt: optionalString
@@ -377,7 +314,7 @@ const milestoneUpdateBody = z.object({
   blockers: optionalStringList,
   blockerDetails: z.array(z.object({
     blockerId: optionalString,
-    type: z.enum(['technical', 'design', 'validation', 'contributor']).optional(),
+    type: z.enum(['technical', 'design', 'validation', 'team', 'contributor']).optional(),
     description: z.string().min(1).max(500),
     status: z.enum(['open', 'resolved']).optional(),
     resolvedAt: optionalString
@@ -398,19 +335,18 @@ const contributionCreateBody = z.object({
 }).passthrough()
 
 const checkInBody = z.object({
-  status: z.enum(['strong_momentum', 'facing_blockers', 'need_contributors', 'pivoting', 'preparing_launch']),
+  status: z.enum(['strong_momentum', 'facing_blockers', 'needs_team_decision', 'need_contributors', 'pivoting', 'preparing_launch']),
   note: z.string().max(500).optional()
 }).passthrough()
 
 const continuationBody = z.object({
   action: z.enum([
+    'continue_planning',
     'continue_building',
     'prepare_incubation',
-    'recruit_contributors',
     'pivot_venture',
     'relaunch_validation',
     'extend_mvp',
-    'launch_beta',
     'archive_venture'
   ]),
   note: z.string().max(800).optional()
@@ -422,7 +358,6 @@ module.exports = {
   paginationQuery,
   projectsQuery,
   userProjectsQuery,
-  leaderboardQuery,
   activityQuery,
   auth: {
     registerBody,
@@ -455,18 +390,7 @@ module.exports = {
     messageBody,
     validationSubmitBody,
     startValidationBody,
-    retryValidationBody,
-    markHelpfulBody
-  },
-  sprint: {
-    sprintApplyBody,
-    sprintStatusUpdateBody
-  },
-  checkpoint: {
-    checkpointSubmitBody,
-    checkpointProjectParams,
-    checkpointUpdateParams,
-    checkpointUpdateBody
+    retryValidationBody
   },
   milestone: {
     milestoneCreateBody,

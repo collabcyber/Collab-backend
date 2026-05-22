@@ -3,13 +3,11 @@ const path = require('path')
 const crypto = require('crypto')
 const mongoose = require('mongoose')
 const Project = require('../models/Project')
-const Checkpoint = require('../models/Checkpoint')
 const Milestone = require('../models/Milestone')
 const ContributionLog = require('../models/ContributionLog')
 const User = require('../models/User')
 const { createNotification } = require('./notificationController')
 const { applyUserStats, POINTS, computeBadges } = require('../utils/points')
-const { submitValidation } = require('./validationController')
 const { sendEmail } = require('../services/emailService')
 const { generateValidationCertificates, buildVerificationUrl } = require('../services/certificateService')
 const { logSecurityEvent } = require('../middleware/securityLogger')
@@ -25,21 +23,16 @@ const {
 } = require('../utils/ventureLifecycle')
 
 const toId = (value) => (value ? value.toString() : '')
-const SPRINT_PHASES = ['problem', 'plan', 'build', 'mvp', 'validation', 'demo']
-const SPRINT_PHASE_INDEX = SPRINT_PHASES.reduce((acc, phase, index) => {
-  acc[phase] = index
-  return acc
-}, {})
 const FILE_LINK_TTL_SECONDS = Math.max(60, parseInt(process.env.FILE_LINK_TTL_SECONDS || '900', 10) || 900)
 const FILE_ACCESS_SECRET = process.env.FILE_ACCESS_SECRET || process.env.JWT_SECRET || 'collab-file-access-secret'
 const PUBLIC_API_BASE = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
 const PROJECT_VISIBILITY = new Set(['private', 'college', 'global'])
-const REVIEWABLE_LIFECYCLE_STAGES = new Set(['prototype', 'mvp', 'growth'])
-const PUBLIC_VALIDATION_STATES = new Set(['in_review', 'passed', 'failed'])
-const ACTIVE_LIFECYCLE_STAGES = new Set(['idea', 'validation', 'team_formation', 'prototype', 'mvp', 'growth', 'pivoted'])
+const REVIEWABLE_LIFECYCLE_STAGES = new Set(['building', 'mvp', 'validation'])
+const ACTIVE_LIFECYCLE_STAGES = new Set(['idea', 'planning', 'building', 'mvp', 'validation', 'pivoted'])
 const TEAM_CHECK_IN_OPTIONS = new Set([
   'strong_momentum',
   'facing_blockers',
+  'needs_team_decision',
   'need_contributors',
   'pivoting',
   'preparing_launch'
@@ -170,6 +163,12 @@ const normalizeValidationTasks = (items) => {
 }
 
 const VALIDATION_EVIDENCE_KINDS = new Set([
+  'screenshot',
+  'survey_pdf',
+  'interview_notes',
+  'feedback_form',
+  'recording',
+  'testing_proof',
   'survey',
   'interview',
   'waitlist',
@@ -207,15 +206,16 @@ const normalizeValidationEvidence = (items) => {
 }
 
 const normalizeMomentumStatus = (value) => {
+  if (value === 'need_contributors') return 'needs_team_decision'
   if (TEAM_CHECK_IN_OPTIONS.has(value)) return value
-  return 'need_contributors'
+  return 'needs_team_decision'
 }
 
 const getProjectLifecycle = (project) => normalizeLifecycleStage(project?.lifecycleStage || inferLifecycleStage(project))
 
 const setProjectLifecycle = (project, nextStage) => updateLifecycleStage(project, nextStage)
 
-const isValidationReviewOpen = (project) => project?.validation?.validationStatus === 'in_review'
+const isLegacyValidationLocked = (project) => project?.validation?.validationStatus === 'in_review'
 
 const isValidationOutcomeFailed = (project) => project?.validation?.validationStatus === 'failed'
 
@@ -247,7 +247,7 @@ const normalizeDependencyIds = (value) => {
 }
 
 const normalizeBlockerDetails = (value, requesterId) => {
-  const validTypes = new Set(['technical', 'design', 'validation', 'contributor'])
+  const validTypes = new Set(['technical', 'design', 'validation', 'team', 'contributor'])
   const validStatuses = new Set(['open', 'resolved'])
   const list = Array.isArray(value) ? value : []
 
@@ -262,7 +262,7 @@ const normalizeBlockerDetails = (value, requesterId) => {
 
       return {
         blockerId: normalizePlainText(item?.blockerId || '', 80) || new mongoose.Types.ObjectId().toString(),
-        type: validTypes.has(item?.type) ? item.type : 'technical',
+        type: item?.type === 'contributor' ? 'team' : validTypes.has(item?.type) ? item.type : 'technical',
         description,
         status,
         createdBy: item?.createdBy || requesterId,
@@ -292,21 +292,21 @@ const getContinuationRecommendations = ({ project, milestones = [] }) => {
 
   if (openBlockers > 0) recommendations.push('Resolve active blockers before increasing scope.')
   if (project?.teamMembers?.length < Math.max(1, Number(project?.numberOfTeammates || 1))) {
-    recommendations.push('Recruit contributors for the roles still missing.')
+    recommendations.push('Confirm your internal team roles before increasing scope.')
   }
-  if (['idea', 'validation'].includes(lifecycleStage)) {
-    recommendations.push('Turn assumptions into validation tasks and evidence.')
+  if (['idea', 'planning'].includes(lifecycleStage)) {
+    recommendations.push('Turn the startup concept into milestones, feature scope, roles, and a timeline.')
   }
-  if (['prototype', 'mvp'].includes(lifecycleStage) && completedMilestones < 2) {
-    recommendations.push('Create concrete prototype and MVP milestones with owners.')
+  if (['building', 'mvp'].includes(lifecycleStage) && completedMilestones < 2) {
+    recommendations.push('Create concrete build and MVP milestones with owners.')
   }
   if (validationStatus === 'failed' || lifecycleStage === 'pivoted') {
-    recommendations.push('Use feedback to pivot or relaunch validation with sharper evidence.')
+    recommendations.push('Use self-conducted feedback to pivot or relaunch validation with sharper evidence.')
   }
-  if (readinessScore >= 75 || lifecycleStage === 'growth') {
-    recommendations.push('Prepare incubation materials and beta launch evidence.')
+  if (readinessScore >= 75 || lifecycleStage === 'validation') {
+    recommendations.push('Prepare incubation materials, validation evidence, and pitch structure.')
   }
-  if (recommendations.length === 0) recommendations.push('Continue building toward the next lifecycle milestone.')
+  if (recommendations.length === 0) recommendations.push('Continue toward the next guided pipeline milestone.')
 
   return recommendations
 }
@@ -314,19 +314,161 @@ const getContinuationRecommendations = ({ project, milestones = [] }) => {
 const buildContinuationPlan = ({ project, milestones = [] }) => ({
   lifecycleStage: getProjectLifecycle(project),
   readinessScore: toReadinessScore(project?.readinessScore || 0),
-  momentumStatus: project?.momentumStatus || 'need_contributors',
+  momentumStatus: normalizeMomentumStatus(project?.momentumStatus),
   recommendations: getContinuationRecommendations({ project, milestones }),
   paths: [
-    { action: 'continue_building', label: 'Continue Building', targetStage: getProjectLifecycle(project) },
+    { action: 'continue_planning', label: 'Continue Planning', targetStage: 'planning' },
+    { action: 'continue_building', label: 'Continue Building', targetStage: 'building' },
+    { action: 'extend_mvp', label: 'Refine MVP', targetStage: 'mvp' },
+    { action: 'relaunch_validation', label: 'Run Validation', targetStage: 'validation' },
     { action: 'prepare_incubation', label: 'Prepare For Incubation', targetStage: 'incubation_ready' },
-    { action: 'recruit_contributors', label: 'Recruit Contributors', targetStage: 'team_formation' },
     { action: 'pivot_venture', label: 'Pivot Venture', targetStage: 'pivoted' },
-    { action: 'relaunch_validation', label: 'Relaunch Validation', targetStage: 'validation' },
-    { action: 'extend_mvp', label: 'Extend MVP', targetStage: 'mvp' },
-    { action: 'launch_beta', label: 'Launch Beta', targetStage: 'growth' },
     { action: 'archive_venture', label: 'Archive Venture', targetStage: 'archived' }
   ]
 })
+
+const formatPacketDate = (value) => {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString()
+}
+
+const getStartupProblem = (project = {}) => (
+  project.validation?.workspace?.problemStatement
+  || project.techProduct?.problem
+  || project.businessStartup?.marketGap
+  || project.description
+  || project.shortPitch
+  || ''
+)
+
+const getStartupTargetUsers = (project = {}) => (
+  project.validation?.workspace?.targetUsers
+  || project.techProduct?.targetUsers
+  || project.businessStartup?.targetAudience
+  || project.servicesOperations?.targetClients
+  || ''
+)
+
+const buildIncubationPacket = ({ project, milestones = [], logs = [] }) => {
+  const lifecycleStage = getProjectLifecycle(project)
+  const validationWorkspace = project.validation?.workspace || {}
+  const completedMilestones = milestones.filter((milestone) => milestone.status === 'completed')
+  const openBlockers = getOpenBlockerCount(milestones)
+  const evidence = validationWorkspace.evidence || []
+  const files = project.files || []
+  const members = [
+    project.owner,
+    ...(project.teamMembers || []).filter((member) => toId(member) !== toId(project.owner))
+  ].filter(Boolean)
+
+  const packetItems = [
+    { key: 'startupSummary', title: 'Startup Summary', ready: Boolean(project.title && project.shortPitch) },
+    { key: 'problemStatement', title: 'Problem Statement', ready: Boolean(getStartupProblem(project)) },
+    { key: 'validationReport', title: 'Validation Report', ready: evidence.length > 0 || (validationWorkspace.tasks || []).length > 0 },
+    { key: 'teamDetails', title: 'Team Details', ready: members.length > 0 },
+    { key: 'executionTimeline', title: 'Execution Timeline', ready: milestones.length > 0 || logs.length > 0 },
+    { key: 'milestoneHistory', title: 'Milestone History', ready: milestones.length > 0 },
+    { key: 'mvpSummary', title: 'MVP Summary', ready: ['mvp', 'validation', 'incubation_ready'].includes(lifecycleStage) },
+    { key: 'prototypeShowcase', title: 'Prototype Showcase', ready: files.length > 0 || Boolean(project.validation?.demoLink) },
+    { key: 'validationEvidence', title: 'Validation Evidence', ready: evidence.length > 0 || (project.validation?.sharedFiles || []).length > 0 },
+    { key: 'pitchDeckStructure', title: 'Pitch Deck Structure', ready: true },
+    { key: 'applicationPacket', title: 'Incubation Application Packet', ready: Number(project.readinessScore || 0) >= 70 },
+    { key: 'executionReports', title: 'Execution Reports', ready: logs.length > 0 }
+  ]
+
+  return {
+    generatedAt: new Date().toISOString(),
+    readinessScore: toReadinessScore(project.readinessScore || 0),
+    stage: {
+      value: lifecycleStage,
+      label: getLifecycleLabel(lifecycleStage),
+      progress: getLifecycleProgress(lifecycleStage)
+    },
+    summary: {
+      startupName: project.title,
+      category: project.category,
+      whyThisMatters: project.shortPitch,
+      problemStatement: getStartupProblem(project),
+      targetUsers: getStartupTargetUsers(project),
+      currentStage: getLifecycleLabel(lifecycleStage),
+      nextStage: getNextLifecycleStage(lifecycleStage) ? getLifecycleLabel(getNextLifecycleStage(lifecycleStage)) : 'Ready to submit'
+    },
+    planning: {
+      goals: project.executionPlan || '',
+      featureScope: project.techProduct?.features || project.designCreative?.deliverables || [],
+      roles: project.rolesNeeded || [],
+      skills: project.skillsRequired || []
+    },
+    teamDetails: members.map((member) => ({
+      id: toId(member?._id || member),
+      name: member?.name || 'Team Member',
+      email: member?.email || '',
+      role: toId(member?._id || member) === toId(project.owner) ? 'Startup Lead' : 'Team Member'
+    })),
+    milestoneHistory: milestones.map((milestone) => ({
+      title: milestone.title,
+      status: milestone.status,
+      priority: milestone.priority,
+      lifecycleStage: getLifecycleLabel(milestone.lifecycleStage),
+      owner: milestone.owner?.name || 'Unassigned',
+      dueDate: formatPacketDate(milestone.dueDate),
+      blockers: [
+        ...(milestone.blockers || []),
+        ...(milestone.blockerDetails || []).filter((blocker) => blocker.status !== 'resolved').map((blocker) => blocker.description)
+      ].filter(Boolean)
+    })),
+    validationReport: {
+      status: project.validation?.validationStatus || 'pending',
+      confidenceScore: validationWorkspace.confidenceScore || 0,
+      questions: [
+        { question: 'Who did you speak to?', answer: validationWorkspace.whoSpokenTo || '' },
+        { question: 'What repeated problems appeared?', answer: validationWorkspace.repeatedProblems || '' },
+        { question: 'What surprised you?', answer: validationWorkspace.surprisingInsights || '' },
+        { question: 'Would users actually use or pay for this?', answer: validationWorkspace.useOrPaySignal || '' },
+        { question: 'What changed after feedback?', answer: validationWorkspace.feedbackChanges || '' }
+      ],
+      tasks: validationWorkspace.tasks || [],
+      evidence
+    },
+    prototypeShowcase: {
+      demoLink: project.validation?.demoLink || '',
+      demoNotes: project.validation?.demoNotes || '',
+      files: files.map((file) => ({
+        id: toId(file._id || file.filename),
+        name: file.originalName,
+        type: file.mimetype,
+        uploadedAt: formatPacketDate(file.uploadedAt)
+      }))
+    },
+    executionTimeline: logs.map((log) => ({
+      action: log.action,
+      impact: log.impact,
+      contributor: log.contributor?.name || 'Team Member',
+      milestone: log.milestoneId?.title || '',
+      timestamp: formatPacketDate(log.timestamp || log.createdAt)
+    })),
+    pitchDeckStructure: [
+      'Startup name and one-line summary',
+      'Problem and target users',
+      'Current solution and MVP scope',
+      'Validation evidence and user learnings',
+      'Team roles and execution history',
+      'Roadmap after incubation support',
+      'Ask from the incubation center'
+    ],
+    checklist: packetItems,
+    readinessSignals: {
+      completedMilestones: completedMilestones.length,
+      totalMilestones: milestones.length,
+      openBlockers,
+      evidenceCount: evidence.length,
+      uploadedAssets: files.length,
+      executionLogs: logs.length
+    }
+  }
+}
 
 const logContribution = async ({ projectId, contributor, milestoneId, action, impact }) => {
   if (!projectId || !contributor || !action) return null
@@ -373,7 +515,7 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
   if (!isPrivilegedViewer) {
     project.teamMembers = (project.teamMembers || []).map((member) => ({
       _id: member._id,
-      name: member.name || 'Contributor'
+      name: member.name || 'Team Member'
     }))
 
     // Keep external view focused on a public summary, not the implementation details.
@@ -386,7 +528,7 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
 
     project.files = []
     project.messages = []
-    if (!PUBLIC_VALIDATION_STATES.has(project.validation?.validationStatus) && project.validation) {
+    if (project.validation) {
       project.validation.sharedFiles = []
     }
     if (project.owner) {
@@ -396,10 +538,6 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
         name: project.owner.name || 'Owner'
       }
     }
-  }
-
-  if (!isPrivilegedViewer && project.validation?.reviews) {
-    project.validation.reviews = []
   }
 
   if (Array.isArray(project.files) && viewerId) {
@@ -514,10 +652,10 @@ exports.createProject = async (req, res) => {
       teamMembers: [userId],
       lifecycleStage: 'idea',
       readinessScore: 10,
-      momentumStatus: 'need_contributors',
+      momentumStatus: 'needs_team_decision',
       teamCheckIn: {
-        status: 'need_contributors',
-        note: 'Need contributors to move this venture forward.',
+        status: 'needs_team_decision',
+        note: 'Team setup needs a clear next decision.',
         updatedAt: new Date(),
         updatedBy: userId
       },
@@ -526,7 +664,7 @@ exports.createProject = async (req, res) => {
         endDate: undefined,
         isActive: false,
         lastActivity: new Date(),
-        totalDurationDays: 14,
+        totalDurationDays: 0,
         isExtendedTimeline: false,
         extensionCount: 0,
         extensionDaysGranted: 0
@@ -661,145 +799,6 @@ exports.getProjects = async (req, res) => {
   }
 }
 
-exports.getDiscoveryProjects = async (req, res) => {
-  try {
-    const userId = req.user?.userId
-    const {
-      lifecycleStage,
-      category,
-      roles,
-      momentumStatus,
-      minReadiness,
-      page = 1,
-      limit = 24
-    } = req.query
-    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 24))
-    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
-    const viewer = userId ? await User.findById(userId).select('college college_id skills primaryCategory executionProfile').lean() : null
-    const viewerCollege = viewer?.college || viewer?.college_id
-    const viewerSkills = new Set((viewer?.skills || []).map((skill) => String(skill).toLowerCase()))
-    const viewerRoles = new Set((viewer?.executionProfile?.roles || []).map((role) => String(role).toLowerCase()))
-    const filter = {
-      lifecycleStage: { $ne: 'archived' },
-      $or: [
-        { visibility: 'global' },
-        ...(viewerCollege ? [{ visibility: 'college', college: viewerCollege }] : []),
-        ...(userId ? [{ owner: userId }, { teamMembers: userId }] : [])
-      ]
-    }
-
-    if (lifecycleStage && lifecycleStage !== 'all') {
-      filter.lifecycleStage = normalizeLifecycleFilter(lifecycleStage)
-    }
-    if (category && category !== 'all') filter.category = category
-    if (momentumStatus && momentumStatus !== 'all') filter.momentumStatus = normalizeMomentumStatus(momentumStatus)
-    if (Number.isFinite(Number(minReadiness))) {
-      filter.readinessScore = { $gte: Math.max(0, Math.min(100, Number(minReadiness))) }
-    }
-    if (roles && roles !== 'all') {
-      const roleRegex = new RegExp(String(roles).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
-      filter.rolesNeeded = roleRegex
-    }
-
-    const projects = await Project.find(filter)
-      .populate('owner', 'name email')
-      .populate('teamMembers', 'name email skills executionProfile')
-      .sort({ readinessScore: -1, updatedAt: -1 })
-      .limit(parsedLimit)
-      .skip((parsedPage - 1) * parsedLimit)
-      .lean()
-
-    const projectIds = projects.map((project) => project._id)
-    const [milestoneCounts, logCounts, total] = await Promise.all([
-      Milestone.aggregate([
-        { $match: { projectId: { $in: projectIds } } },
-        {
-          $group: {
-            _id: '$projectId',
-            total: { $sum: 1 },
-            completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-            blocked: { $sum: { $cond: [{ $eq: ['$status', 'blocked'] }, 1, 0] } }
-          }
-        }
-      ]),
-      ContributionLog.aggregate([
-        { $match: { projectId: { $in: projectIds } } },
-        { $group: { _id: '$projectId', total: { $sum: 1 }, lastActivity: { $max: '$timestamp' } } }
-      ]),
-      Project.countDocuments(filter)
-    ])
-
-    const milestoneMap = new Map(milestoneCounts.map((item) => [item._id.toString(), item]))
-    const logMap = new Map(logCounts.map((item) => [item._id.toString(), item]))
-    const ventures = projects.map((project) => {
-      const skillMatches = (project.skillsRequired || []).filter((skill) => viewerSkills.has(String(skill).toLowerCase())).length
-      const roleMatches = (project.rolesNeeded || []).filter((role) => viewerRoles.has(String(role).toLowerCase())).length
-      const categoryMatch = viewer?.primaryCategory && project.category === viewer.primaryCategory ? 1 : 0
-      const sameCollege = viewerCollege && project.college && viewerCollege.toString() === project.college.toString() ? 1 : 0
-      const neededSlots = Math.max(0, Number(project.numberOfTeammates || 1) - (project.teamMembers || []).length)
-      const rawScore = (skillMatches * 18) + (roleMatches * 22) + (categoryMatch * 12) + (sameCollege * 8) + (neededSlots > 0 ? 12 : 0)
-      const projectId = project._id.toString()
-
-      return {
-        ...project,
-        discovery: {
-          matchScore: Math.max(0, Math.min(100, rawScore)),
-          skillMatches,
-          roleMatches,
-          neededSlots,
-          milestoneSummary: milestoneMap.get(projectId) || { total: 0, completed: 0, blocked: 0 },
-          activitySummary: logMap.get(projectId) || { total: 0, lastActivity: project.updatedAt }
-        }
-      }
-    })
-
-    res.json({
-      ventures,
-      pagination: {
-        page: parsedPage,
-        limit: parsedLimit,
-        total,
-        pages: Math.ceil(total / parsedLimit)
-      }
-    })
-  } catch (error) {
-    console.error('Get discovery ventures error:', error)
-    res.status(500).json({ message: 'Failed to fetch discovery ventures' })
-  }
-}
-
-exports.getValidationProjects = async (req, res) => {
-  try {
-    const { page = 1, limit = 20 } = req.query
-    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
-    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
-    const viewerId = req.user?.userId ? req.user.userId.toString() : ''
-
-    const filter = { 'validation.validationStatus': 'in_review' }
-    const projects = await Project.find(filter)
-      .populate('owner', 'name')
-      .sort({ updatedAt: -1 })
-      .limit(parsedLimit)
-      .skip((parsedPage - 1) * parsedLimit)
-
-    const total = await Project.countDocuments(filter)
-    const sanitizedProjects = projects.map((project) => sanitizeProjectForViewer(project, viewerId))
-
-    res.json({
-      projects: sanitizedProjects,
-      pagination: {
-        page: parsedPage,
-        limit: parsedLimit,
-        total,
-        pages: Math.ceil(total / parsedLimit)
-      }
-    })
-  } catch (error) {
-    console.error('Get validation ventures error:', error)
-    res.status(500).json({ message: 'Failed to fetch validation ventures' })
-  }
-}
-
 exports.getProjectOptions = async (req, res) => {
   try {
     const [roles, skills] = await Promise.all([
@@ -829,7 +828,6 @@ exports.getProjectById = async (req, res) => {
       .populate('messages.sender', 'name email')
       .populate('files.uploadedBy', 'name email')
       .populate('validation.sharedFiles.uploadedBy', 'name email')
-      .populate('validation.reviews.reviewer', 'name')
 
     if (!project) {
       return res.status(404).json({ message: 'Venture not found' })
@@ -864,217 +862,6 @@ exports.getProjectById = async (req, res) => {
   }
 }
 
-exports.getProjectProof = async (req, res) => {
-  try {
-    const { id } = req.params
-
-    const project = await Project.findById(id)
-      .select('title shortPitch description lifecycleStage readinessScore momentumStatus teamMembers owner')
-      .populate('owner', 'name')
-      .populate('teamMembers', 'name')
-      .lean()
-
-    if (!project) {
-      return res.status(404).json({ message: 'Venture not found' })
-    }
-
-    const checkpoints = await Checkpoint.find({ projectId: id })
-      .select('phase submissionLink description submittedAt')
-      .lean()
-
-    checkpoints.sort((a, b) => {
-      const phaseDiff = (SPRINT_PHASE_INDEX[a.phase] ?? Number.MAX_SAFE_INTEGER) - (SPRINT_PHASE_INDEX[b.phase] ?? Number.MAX_SAFE_INTEGER)
-      if (phaseDiff !== 0) return phaseDiff
-      return new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime()
-    })
-
-    const milestones = await Milestone.find({ projectId: id })
-      .select('title status dueDate owner')
-      .populate('owner', 'name')
-      .sort({ dueDate: 1, createdAt: -1 })
-      .lean()
-
-    const membersMap = new Map()
-    const ownerId = toId(project.owner?._id || project.owner)
-    const ownerName = project.owner?.name || 'Owner'
-    if (ownerId) {
-      membersMap.set(ownerId, ownerName)
-    }
-
-    ;(project.teamMembers || []).forEach((member) => {
-      const memberId = toId(member?._id || member)
-      if (!memberId) return
-      if (!membersMap.has(memberId)) {
-        membersMap.set(memberId, member?.name || 'Team Contributor')
-      }
-    })
-
-    const lifecycleStage = getProjectLifecycle(project)
-
-    return res.json({
-      id: project._id,
-      title: project.title,
-      description: project.shortPitch || project.description || '',
-      teamMembers: Array.from(membersMap.values()),
-      lifecycleStage,
-      lifecycleLabel: getLifecycleLabel(lifecycleStage),
-      lifecycleProgress: getLifecycleProgress(lifecycleStage),
-      nextLifecycleStage: getNextLifecycleStage(lifecycleStage),
-      readinessScore: toReadinessScore(project.readinessScore, 0),
-      momentumStatus: project.momentumStatus || 'need_contributors',
-      checkpoints: checkpoints.map((checkpoint) => ({
-        phase: checkpoint.phase,
-        submissionLink: checkpoint.submissionLink,
-        description: checkpoint.description || '',
-        submittedAt: checkpoint.submittedAt
-      })),
-      milestones: milestones.map((milestone) => ({
-        id: milestone._id,
-        title: milestone.title,
-        status: milestone.status,
-        dueDate: milestone.dueDate,
-        owner: milestone.owner?.name || null
-      })),
-      finalLifecycleStatus: lifecycleStage === 'incubation_ready' ? 'completed' : 'in_progress',
-      currentLifecycleStage: lifecycleStage
-    })
-  } catch (error) {
-    console.error('Get venture proof error:', error)
-    return res.status(500).json({ message: 'Failed to load venture proof' })
-  }
-}
-
-exports.joinProject = async (req, res) => {
-  try {
-    const { id } = req.params
-    const userId = req.user.userId
-
-    const project = await Project.findById(id)
-    if (!project) {
-      return res.status(404).json({ message: 'Venture not found' })
-    }
-
-    const maxTeamMembers = project.numberOfTeammates || 0
-    const teamCount = (project.teamMembers || []).length
-
-    if (teamCount >= maxTeamMembers) {
-      await createNotification(
-        userId,
-        'team_full',
-        'Team Full',
-        `${project.title} is now full.`,
-        project._id,
-        project.owner,
-        false,
-        `/project/${project._id}`
-      )
-      return res.status(400).json({ message: 'Team is full' })
-    }
-
-    const userIdString = userId.toString()
-    const interested = (project.interestedUsers || []).map((uid) => uid.toString())
-    const team = (project.teamMembers || []).map((uid) => uid.toString())
-
-    if (project.owner?.toString() === userIdString) {
-      return res.status(400).json({ message: 'Owner cannot join their own venture' })
-    }
-
-    if (team.includes(userIdString)) {
-      return res.status(400).json({ message: 'Already a team contributor' })
-    }
-
-    if (interested.includes(userIdString)) {
-      return res.status(400).json({ message: 'Already requested to join' })
-    }
-
-    project.interestedUsers.push(userId)
-    project.momentumStatus = 'need_contributors'
-    setProjectLifecycle(project, 'team_formation')
-    await project.save()
-
-    await logContribution({
-      projectId: project._id,
-      contributor: userId,
-      action: 'Applied to contribute',
-      impact: 'Contributor application submitted to venture lead.'
-    })
-
-    const requester = await User.findById(userId).select('name email')
-    if (requester) {
-      await createNotification(
-        project.owner,
-        'join_request',
-        'New join request',
-        `${requester.name || requester.email} requested to join ${project.title}.`,
-        project._id,
-        userId,
-        true,
-        `/project/${project._id}`
-      )
-    }
-
-    res.json({ message: 'Join request sent successfully' })
-  } catch (error) {
-    console.error('Join venture error:', error)
-    res.status(500).json({ message: 'Failed to join venture' })
-  }
-}
-
-exports.respondToJoinRequest = async (req, res) => {
-  try {
-    const { id } = req.params
-    const requesterId = req.user?.userId || req.body.requesterId
-    const { userId, action } = req.body
-
-    if (!requesterId || !userId || !action) {
-      return res.status(400).json({ message: 'requesterId, userId, and action are required' })
-    }
-
-    const project = await Project.findById(id)
-    if (!project) {
-      return res.status(404).json({ message: 'Venture not found' })
-    }
-
-    if (project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only venture owner can respond to requests' })
-    }
-
-    if (!['accept', 'reject'].includes(action)) {
-      return res.status(400).json({ message: 'Action must be accept or reject' })
-    }
-
-    const interested = (project.interestedUsers || []).map((uid) => uid.toString())
-    if (!interested.includes(userId.toString())) {
-      return res.status(400).json({ message: 'User has not expressed interest yet' })
-    }
-
-    if (action === 'reject') {
-      project.interestedUsers = project.interestedUsers.filter((uid) => uid.toString() !== userId.toString())
-      await project.save()
-
-      await createNotification(
-        userId,
-        'join_rejected',
-        'Join request declined',
-        `Your request to join ${project.title} was declined.`,
-        project._id,
-        project.owner,
-        false,
-        `/project/${project._id}`
-      )
-
-      return res.json({ message: 'Join request rejected' })
-    }
-
-    req.body.requesterId = requesterId
-    req.body.userId = userId
-    return exports.addTeamMember(req, res)
-  } catch (error) {
-    console.error('Respond to join request error:', error)
-    res.status(500).json({ message: 'Failed to respond to join request' })
-  }
-}
-
 exports.addTeamMember = async (req, res) => {
   try {
     const { id } = req.params
@@ -1101,11 +888,6 @@ exports.addTeamMember = async (req, res) => {
       return res.status(403).json({ message: 'Only venture owner can add team contributors' })
     }
 
-    const interested = (project.interestedUsers || []).map((uid) => uid.toString())
-    if (!interested.includes(userId.toString())) {
-      return res.status(400).json({ message: 'User has not expressed interest yet' })
-    }
-
     const team = (project.teamMembers || []).map((uid) => uid.toString())
     if (team.includes(userId.toString())) {
       return res.status(400).json({ message: 'User already on team' })
@@ -1115,11 +897,11 @@ exports.addTeamMember = async (req, res) => {
     project.interestedUsers = project.interestedUsers.filter((uid) => uid.toString() !== userId.toString())
 
     const teamCount = (project.teamMembers || []).length
-    if (teamCount >= maxTeamMembers && ['idea', 'validation', 'team_formation'].includes(getProjectLifecycle(project))) {
+    if (teamCount >= maxTeamMembers && ['idea', 'planning'].includes(getProjectLifecycle(project))) {
       if (!project.buildPhase) {
         project.buildPhase = {}
       }
-      setProjectLifecycle(project, 'prototype')
+      setProjectLifecycle(project, 'building')
       project.momentumStatus = 'strong_momentum'
       project.readinessScore = toReadinessScore(project.readinessScore, 28)
       project.teamCheckIn = {
@@ -1188,9 +970,8 @@ exports.addTeamMember = async (req, res) => {
       .populate('messages.sender', 'name email')
       .populate('files.uploadedBy', 'name email')
       .populate('validation.sharedFiles.uploadedBy', 'name email')
-      .populate('validation.reviews.reviewer', 'name')
 
-    res.json({ message: 'Contributor added', project: populated })
+    res.json({ message: 'Team member added', project: populated })
   } catch (error) {
     console.error('Error adding team contributor:', error)
     res.status(500).json({ message: 'Failed to add team contributor' })
@@ -1247,15 +1028,15 @@ exports.updateProjectRequirements = async (req, res) => {
 
     const updatedTeamCount = (project.teamMembers || []).length
     if (updatedTeamCount < (project.numberOfTeammates || 1)) {
-      project.momentumStatus = 'need_contributors'
-      setProjectLifecycle(project, 'team_formation')
+      project.momentumStatus = 'needs_team_decision'
+      setProjectLifecycle(project, 'planning')
       project.teamCheckIn = {
-        status: 'need_contributors',
-        note: 'Additional contributors required to hit target team size.',
+        status: 'needs_team_decision',
+        note: 'Team setup needs attention before increasing scope.',
         updatedAt: new Date(),
         updatedBy: requesterId
       }
-    } else if (['prototype', 'mvp', 'growth'].includes(getProjectLifecycle(project))) {
+    } else if (['building', 'mvp', 'validation'].includes(getProjectLifecycle(project))) {
       project.momentumStatus = 'strong_momentum'
       setProjectLifecycle(project, getProjectLifecycle(project))
       project.teamCheckIn = {
@@ -1387,6 +1168,11 @@ exports.updateValidationWorkspace = async (req, res) => {
       problemStatement,
       targetUsers,
       coreAssumptions,
+      whoSpokenTo,
+      repeatedProblems,
+      surprisingInsights,
+      useOrPaySignal,
+      feedbackChanges,
       validationTasks,
       validationEvidence,
       confidenceScore
@@ -1405,7 +1191,7 @@ exports.updateValidationWorkspace = async (req, res) => {
     const isOwner = toId(project.owner) === requesterIdString
     const isTeamMember = (project.teamMembers || []).some((memberId) => toId(memberId) === requesterIdString)
     if (!isOwner && !isTeamMember) {
-      return res.status(403).json({ message: 'Only venture contributors can update validation workspace' })
+      return res.status(403).json({ message: 'Only startup team members can update validation workspace' })
     }
 
     if (!project.validation) {
@@ -1425,6 +1211,26 @@ exports.updateValidationWorkspace = async (req, res) => {
 
     if (typeof coreAssumptions !== 'undefined') {
       project.validation.workspace.coreAssumptions = normalizeValidationAssumptions(coreAssumptions)
+    }
+
+    if (typeof whoSpokenTo !== 'undefined') {
+      project.validation.workspace.whoSpokenTo = normalizeLongText(whoSpokenTo, 2000)
+    }
+
+    if (typeof repeatedProblems !== 'undefined') {
+      project.validation.workspace.repeatedProblems = normalizeLongText(repeatedProblems, 2000)
+    }
+
+    if (typeof surprisingInsights !== 'undefined') {
+      project.validation.workspace.surprisingInsights = normalizeLongText(surprisingInsights, 2000)
+    }
+
+    if (typeof useOrPaySignal !== 'undefined') {
+      project.validation.workspace.useOrPaySignal = normalizeLongText(useOrPaySignal, 2000)
+    }
+
+    if (typeof feedbackChanges !== 'undefined') {
+      project.validation.workspace.feedbackChanges = normalizeLongText(feedbackChanges, 2000)
     }
 
     if (typeof validationTasks !== 'undefined') {
@@ -1453,7 +1259,7 @@ exports.updateValidationWorkspace = async (req, res) => {
     const blendedReadiness = toReadinessScore(taskScore + evidenceScore + confidencePart, project.readinessScore)
     project.readinessScore = Math.max(project.readinessScore || 0, blendedReadiness)
     setProjectLifecycle(project, 'validation')
-    project.momentumStatus = tasks.length === 0 ? 'need_contributors' : 'strong_momentum'
+    project.momentumStatus = tasks.length === 0 ? 'facing_blockers' : 'strong_momentum'
 
     await project.save()
 
@@ -1533,15 +1339,15 @@ exports.removeTeamMember = async (req, res) => {
     project.teamMembers = project.teamMembers.filter((uid) => uid.toString() !== userId.toString())
     const nextTeamCount = (project.teamMembers || []).length
     if (nextTeamCount < (project.numberOfTeammates || 1)) {
-      project.momentumStatus = 'need_contributors'
+      project.momentumStatus = 'needs_team_decision'
       project.teamCheckIn = {
-        status: 'need_contributors',
-        note: 'Team size dropped below target; new contributors required.',
+        status: 'needs_team_decision',
+        note: 'Team setup changed; clarify responsibilities before continuing.',
         updatedAt: new Date(),
         updatedBy: requesterId
       }
-      if (['prototype', 'mvp', 'growth'].includes(getProjectLifecycle(project))) {
-        setProjectLifecycle(project, 'team_formation')
+      if (['building', 'mvp', 'validation'].includes(getProjectLifecycle(project))) {
+        setProjectLifecycle(project, 'planning')
       }
     }
     await project.save()
@@ -1560,9 +1366,8 @@ exports.removeTeamMember = async (req, res) => {
       .populate('messages.sender', 'name email')
       .populate('files.uploadedBy', 'name email')
       .populate('validation.sharedFiles.uploadedBy', 'name email')
-      .populate('validation.reviews.reviewer', 'name')
 
-    res.json({ message: 'Contributor removed', project: populated })
+    res.json({ message: 'Team member removed', project: populated })
   } catch (error) {
     console.error('Error removing team contributor:', error)
     res.status(500).json({ message: 'Failed to remove team contributor' })
@@ -1644,7 +1449,6 @@ exports.addProjectMessage = async (req, res) => {
       .populate('messages.sender', 'name email')
       .populate('files.uploadedBy', 'name email')
       .populate('validation.sharedFiles.uploadedBy', 'name email')
-      .populate('validation.reviews.reviewer', 'name')
 
     res.json({ message: 'Message added', project: populated })
   } catch (error) {
@@ -1772,7 +1576,6 @@ exports.addProjectFile = async (req, res) => {
       .populate('messages.sender', 'name email')
       .populate('files.uploadedBy', 'name email')
       .populate('validation.sharedFiles.uploadedBy', 'name email')
-      .populate('validation.reviews.reviewer', 'name')
 
     res.status(201).json({ message: 'File uploaded', project: populated })
   } catch (error) {
@@ -1834,7 +1637,6 @@ exports.deleteProjectFile = async (req, res) => {
       .populate('messages.sender', 'name email')
       .populate('files.uploadedBy', 'name email')
       .populate('validation.sharedFiles.uploadedBy', 'name email')
-      .populate('validation.reviews.reviewer', 'name')
 
     res.json({ message: 'File removed', project: populated })
   } catch (error) {
@@ -1929,7 +1731,7 @@ exports.startBuildPhase = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can start the build phase' })
     }
 
-    setProjectLifecycle(project, 'prototype')
+    setProjectLifecycle(project, 'building')
     project.momentumStatus = 'strong_momentum'
     project.teamCheckIn = {
       status: 'strong_momentum',
@@ -1940,11 +1742,11 @@ exports.startBuildPhase = async (req, res) => {
     project.readinessScore = toReadinessScore(project.readinessScore, 30)
     project.buildPhase = {
       startDate: new Date(),
-      endDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
+      endDate: undefined,
       isActive: true,
       lastActivity: new Date(),
       lastPenaltyAt: project.buildPhase?.lastPenaltyAt,
-      totalDurationDays: 14,
+      totalDurationDays: 0,
       isExtendedTimeline: false,
       extensionCount: 0,
       extensionDaysGranted: 0
@@ -1956,7 +1758,7 @@ exports.startBuildPhase = async (req, res) => {
       projectId: project._id,
       contributor: requesterId,
       action: 'Started build phase',
-      impact: 'Venture moved into prototype execution stage.'
+      impact: 'Startup moved into guided building stage.'
     })
 
     res.json({ message: 'Build phase started', project })
@@ -2009,22 +1811,7 @@ exports.startValidation = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can validate' })
     }
 
-    const maxTeamMembers = project.numberOfTeammates || 0
-    const teamCount = (project.teamMembers || []).length
-    if (teamCount < maxTeamMembers) {
-      return res.status(400).json({ message: 'Team is not full yet' })
-    }
-
-    const endDate = project.buildPhase?.endDate
-    if (!endDate) {
-      return res.status(400).json({ message: 'Build phase not started' })
-    }
-
-    if (new Date(endDate) < new Date()) {
-      return res.status(400).json({ message: 'Time limit expired' })
-    }
-
-    if (isValidationReviewOpen(project) || isValidationOutcomePassed(project)) {
+    if (isLegacyValidationLocked(project) || isValidationOutcomePassed(project)) {
       return res.status(400).json({ message: 'Venture already in validation' })
     }
 
@@ -2036,48 +1823,26 @@ exports.startValidation = async (req, res) => {
 
     const lifecycleStage = getProjectLifecycle(project)
     if (!REVIEWABLE_LIFECYCLE_STAGES.has(lifecycleStage)) {
-      return res.status(400).json({ message: 'Venture must reach Prototype, MVP, or Growth before external validation review' })
+      return res.status(400).json({ message: 'Startup must reach Building, MVP, or Validation before guided validation' })
     }
 
-    setProjectLifecycle(project, lifecycleStage === 'prototype' ? 'mvp' : lifecycleStage)
+    setProjectLifecycle(project, 'validation')
     project.momentumStatus = 'strong_momentum'
     project.teamCheckIn = {
       status: 'strong_momentum',
-      note: 'Validation discovery started with real user feedback collection.',
+      note: 'Self-conducted validation started with real user feedback collection.',
       updatedAt: new Date(),
       updatedBy: requesterId
     }
-    project.buildPhase.isActive = false
+    project.buildPhase = {
+      ...(project.buildPhase || {}),
+      isActive: false,
+      lastActivity: new Date()
+    }
     if (!project.validation) {
       project.validation = {}
     }
-    project.validation.currentReviews = 0
-    project.validation.averageRating = 0
-    project.validation.criteriaAverages = {
-      problemClarity: 0,
-      userPainSeverity: 0,
-      solutionFit: 0,
-      innovation: 0,
-      usefulness: 0,
-      executionReadiness: 0,
-      feasibility30Days: 0,
-      evidenceStrength: 0,
-      scalabilityPotential: 0,
-      teamReadiness: 0,
-      confidence: 0
-    }
-    project.validation.dimensionAverages = {
-      desirability: 0,
-      feasibility: 0,
-      differentiation: 0,
-      readiness: 0
-    }
-    project.validation.signalBreakdown = {
-      wouldUse: { yes: 0, maybe: 0, no: 0 },
-      verdict: { pass: 0, rework: 0, hold: 0 }
-    }
-    project.validation.reviews = []
-    project.validation.validationStatus = 'in_review'
+    project.validation.validationStatus = 'pending'
     project.validation.validatedAt = undefined
     project.validation.featuredAt = undefined
     project.validation.lastFailureReason = undefined
@@ -2119,8 +1884,8 @@ exports.startValidation = async (req, res) => {
     await logContribution({
       projectId: project._id,
       contributor: requesterId,
-      action: 'Moved venture to validation',
-      impact: 'Validation workflow activated inside venture workspace.'
+      action: 'Started self-conducted validation',
+      impact: 'Validation questions, evidence, and readiness materials were activated inside the startup workspace.'
     })
 
     const apiBase = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
@@ -2136,13 +1901,13 @@ exports.startValidation = async (req, res) => {
         const verifyUrl = buildVerificationUrl(cert.certificateId)
         const downloadUrl = `${apiBase}${cert.url}`
 
-        const subject = 'Your Collab Validation Phase Certificate'
-        const text = `Hi ${member.name || 'there'},\n\nYour venture "${project.title}" has entered the Validation phase.\n\nDownload your certificate: ${downloadUrl}\nVerify: ${verifyUrl}\n\n— Collab`
+        const subject = 'Your Collab Startup Execution Certificate'
+        const text = `Hi ${member.name || 'there'},\n\nYour startup "${project.title}" has reached the Validation stage inside Collab.\n\nDownload your Startup Execution Certificate: ${downloadUrl}\nVerify: ${verifyUrl}\n\n— Collab`
         const html = `
           <div style="font-family: Arial, sans-serif; line-height:1.6;">
             <p>Hi ${member.name || 'there'},</p>
-            <p>Your venture <strong>${project.title}</strong> has entered the <strong>Validation</strong> phase.</p>
-            <p>You can download your certificate here:</p>
+            <p>Your startup <strong>${project.title}</strong> has reached the <strong>Validation</strong> stage inside Collab.</p>
+            <p>You can download your Startup Execution Certificate here:</p>
             <p><a href="${downloadUrl}">${downloadUrl}</a></p>
             <p>Verification link:</p>
             <p><a href="${verifyUrl}">${verifyUrl}</a></p>
@@ -2167,7 +1932,7 @@ exports.startValidation = async (req, res) => {
     const failedEmails = emailResults.filter((result) => result.status === 'rejected').length
 
     res.json({
-      message: 'Venture sent to validation',
+      message: 'Self-conducted validation started',
       project,
       certificateEmails: {
         total: members.length,
@@ -2176,7 +1941,7 @@ exports.startValidation = async (req, res) => {
     })
   } catch (error) {
     console.error('Start validation error:', error)
-    res.status(500).json({ message: 'Failed to send venture to validation' })
+    res.status(500).json({ message: 'Failed to start validation' })
   }
 }
 
@@ -2194,7 +1959,7 @@ exports.removeFromValidation = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can update validation status' })
     }
 
-    if (!isValidationReviewOpen(project)) {
+    if (!isLegacyValidationLocked(project)) {
       return res.status(400).json({ message: 'Venture is not in validation' })
     }
 
@@ -2233,32 +1998,6 @@ exports.removeFromValidation = async (req, res) => {
     if (!project.validation) {
       project.validation = {}
     }
-    project.validation.currentReviews = 0
-    project.validation.averageRating = 0
-    project.validation.criteriaAverages = {
-      problemClarity: 0,
-      userPainSeverity: 0,
-      solutionFit: 0,
-      innovation: 0,
-      usefulness: 0,
-      executionReadiness: 0,
-      feasibility30Days: 0,
-      evidenceStrength: 0,
-      scalabilityPotential: 0,
-      teamReadiness: 0,
-      confidence: 0
-    }
-    project.validation.dimensionAverages = {
-      desirability: 0,
-      feasibility: 0,
-      differentiation: 0,
-      readiness: 0
-    }
-    project.validation.signalBreakdown = {
-      wouldUse: { yes: 0, maybe: 0, no: 0 },
-      verdict: { pass: 0, rework: 0, hold: 0 }
-    }
-    project.validation.reviews = []
     project.validation.validationStatus = 'pending'
     project.validation.validatedAt = undefined
     project.validation.featuredAt = undefined
@@ -2308,7 +2047,7 @@ exports.extendValidationTimeline = async (req, res) => {
       project.buildPhase = {}
     }
 
-    setProjectLifecycle(project, 'prototype')
+    setProjectLifecycle(project, 'building')
     project.momentumStatus = 'facing_blockers'
     project.teamCheckIn = {
       status: 'facing_blockers',
@@ -2329,32 +2068,6 @@ exports.extendValidationTimeline = async (req, res) => {
       project.validation = {}
     }
     project.validation.validationStatus = 'pending'
-    project.validation.currentReviews = 0
-    project.validation.averageRating = 0
-    project.validation.criteriaAverages = {
-      problemClarity: 0,
-      userPainSeverity: 0,
-      solutionFit: 0,
-      innovation: 0,
-      usefulness: 0,
-      executionReadiness: 0,
-      feasibility30Days: 0,
-      evidenceStrength: 0,
-      scalabilityPotential: 0,
-      teamReadiness: 0,
-      confidence: 0
-    }
-    project.validation.dimensionAverages = {
-      desirability: 0,
-      feasibility: 0,
-      differentiation: 0,
-      readiness: 0
-    }
-    project.validation.signalBreakdown = {
-      wouldUse: { yes: 0, maybe: 0, no: 0 },
-      verdict: { pass: 0, rework: 0, hold: 0 }
-    }
-    project.validation.reviews = []
     project.validation.validatedAt = undefined
     project.validation.featuredAt = undefined
 
@@ -2393,51 +2106,6 @@ exports.extendValidationTimeline = async (req, res) => {
   }
 }
 
-exports.submitReview = async (req, res) => {
-  req.body.projectId = req.params.id
-  return submitValidation(req, res)
-}
-
-exports.markReviewHelpful = async (req, res) => {
-  try {
-    const { id, reviewId } = req.params
-    const requesterId = req.user?.userId
-
-    const project = await Project.findById(id)
-    if (!project) {
-      return res.status(404).json({ message: 'Venture not found' })
-    }
-
-    if (!requesterId || project.owner.toString() !== requesterId.toString()) {
-      return res.status(403).json({ message: 'Only the venture owner can mark feedback helpful' })
-    }
-
-    const reviews = project.validation?.reviews || []
-    const review = reviews.id(reviewId)
-
-    if (!review) {
-      return res.status(404).json({ message: 'Review not found' })
-    }
-
-    if (review.helpful) {
-      return res.status(400).json({ message: 'Feedback already marked helpful' })
-    }
-
-    review.helpful = true
-    await project.save()
-
-    await applyUserStats(review.reviewer, {
-      points: POINTS.helpful_feedback,
-      inc: { helpfulFeedback: 1 }
-    })
-
-    res.json({ message: 'Feedback marked helpful' })
-  } catch (error) {
-    console.error('Mark helpful error:', error)
-    res.status(500).json({ message: 'Failed to mark feedback helpful' })
-  }
-}
-
 exports.getMilestones = async (req, res) => {
   try {
     const { id } = req.params
@@ -2449,7 +2117,7 @@ exports.getMilestones = async (req, res) => {
 
     const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can access milestones' })
+      return res.status(403).json({ message: 'Only startup team members can access milestones' })
     }
 
     const milestones = await Milestone.find({ projectId: id })
@@ -2479,7 +2147,7 @@ exports.createMilestone = async (req, res) => {
     const requesterIdString = requesterId?.toString()
     const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can create milestones' })
+      return res.status(403).json({ message: 'Only startup team members can create milestones' })
     }
 
     const milestone = await Milestone.create({
@@ -2535,7 +2203,7 @@ exports.updateMilestone = async (req, res) => {
     const requesterIdString = requesterId?.toString()
     const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can update milestones' })
+      return res.status(403).json({ message: 'Only startup team members can update milestones' })
     }
 
     const milestone = await Milestone.findOne({ _id: milestoneId, projectId: id })
@@ -2643,7 +2311,7 @@ exports.getContributionLogs = async (req, res) => {
     }
     const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can view execution logs' })
+      return res.status(403).json({ message: 'Only startup team members can view execution logs' })
     }
 
     const logs = await ContributionLog.find({ projectId: id })
@@ -2670,7 +2338,7 @@ exports.createContributionLog = async (req, res) => {
     }
     const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can post execution logs' })
+      return res.status(403).json({ message: 'Only startup team members can post execution logs' })
     }
 
     const entry = await logContribution({
@@ -2702,7 +2370,7 @@ exports.updateTeamCheckIn = async (req, res) => {
     }
     const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can update team check-in' })
+      return res.status(403).json({ message: 'Only startup team members can update team check-in' })
     }
 
     const nextStatus = normalizeMomentumStatus(status)
@@ -2750,7 +2418,7 @@ exports.getContinuationPlan = async (req, res) => {
     const requesterIdString = requesterId?.toString()
     const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can view continuation plan' })
+      return res.status(403).json({ message: 'Only startup team members can view continuation plan' })
     }
 
     const milestones = await Milestone.find({ projectId: id }).lean()
@@ -2758,6 +2426,44 @@ exports.getContinuationPlan = async (req, res) => {
   } catch (error) {
     console.error('Get continuation plan error:', error)
     return res.status(500).json({ message: 'Failed to load continuation plan' })
+  }
+}
+
+exports.getIncubationPacket = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const project = await Project.findById(id)
+      .populate('owner', 'name email')
+      .populate('teamMembers', 'name email')
+      .lean()
+
+    if (!project) {
+      return res.status(404).json({ message: 'Startup workspace not found' })
+    }
+
+    const requesterIdString = requesterId?.toString()
+    const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner?._id || project.owner) === requesterIdString
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only startup team members can view incubation materials' })
+    }
+
+    const [milestones, logs] = await Promise.all([
+      Milestone.find({ projectId: id }).populate('owner', 'name email').lean(),
+      ContributionLog.find({ projectId: id })
+        .populate('contributor', 'name email')
+        .populate('milestoneId', 'title status lifecycleStage')
+        .sort({ timestamp: -1 })
+        .limit(100)
+        .lean()
+    ])
+
+    return res.json({
+      packet: buildIncubationPacket({ project, milestones, logs })
+    })
+  } catch (error) {
+    console.error('Get incubation packet error:', error)
+    return res.status(500).json({ message: 'Failed to generate incubation packet' })
   }
 }
 
@@ -2774,34 +2480,35 @@ exports.applyContinuationAction = async (req, res) => {
     const requesterIdString = requesterId?.toString()
     const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
     if (!isTeam) {
-      return res.status(403).json({ message: 'Only venture contributors can continue this venture' })
+      return res.status(403).json({ message: 'Only startup team members can continue this venture' })
     }
 
     if (!project.validation) project.validation = {}
     const currentStage = getProjectLifecycle(project)
     const cleanedNote = normalizeLongText(note || '', 800)
     let nextStage = currentStage
-    let momentumStatus = project.momentumStatus || 'need_contributors'
+    let momentumStatus = normalizeMomentumStatus(project.momentumStatus)
     let readinessDelta = 1
     let activity = 'Continued venture execution'
 
-    if (action === 'continue_building') {
+    if (action === 'continue_planning') {
+      nextStage = 'planning'
+      momentumStatus = 'strong_momentum'
+      readinessDelta = 2
+      activity = 'Chose next step: Continue Planning'
+    } else if (action === 'continue_building') {
       nextStage = getNextLifecycleStage(currentStage) || currentStage
+      if (!['building', 'mvp', 'validation', 'incubation_ready'].includes(nextStage)) nextStage = 'building'
       momentumStatus = 'strong_momentum'
       readinessDelta = 3
-      activity = 'Chose continuation path: Continue Building'
+      activity = 'Chose next step: Continue Building'
     } else if (action === 'prepare_incubation') {
       nextStage = Number(project.readinessScore || 0) >= 70 || project.validation?.validationStatus === 'passed'
         ? 'incubation_ready'
-        : 'growth'
+        : 'validation'
       momentumStatus = 'preparing_launch'
       readinessDelta = 8
-      activity = 'Chose continuation path: Prepare For Incubation'
-    } else if (action === 'recruit_contributors') {
-      nextStage = 'team_formation'
-      momentumStatus = 'need_contributors'
-      readinessDelta = 1
-      activity = 'Chose continuation path: Recruit Contributors'
+      activity = 'Chose next step: Prepare For Incubation'
     } else if (action === 'pivot_venture') {
       nextStage = 'pivoted'
       momentumStatus = 'pivoting'
@@ -2809,13 +2516,13 @@ exports.applyContinuationAction = async (req, res) => {
       project.validation.validationStatus = project.validation?.validationStatus === 'in_review'
         ? 'pending'
         : project.validation?.validationStatus || 'pending'
-      activity = 'Chose continuation path: Pivot Venture'
+      activity = 'Chose next step: Pivot Venture'
     } else if (action === 'relaunch_validation') {
       nextStage = 'validation'
       momentumStatus = 'strong_momentum'
       readinessDelta = 2
       project.validation.validationStatus = 'pending'
-      activity = 'Chose continuation path: Relaunch Validation'
+      activity = 'Chose next step: Run Self-Conducted Validation'
     } else if (action === 'extend_mvp') {
       nextStage = 'mvp'
       momentumStatus = 'strong_momentum'
@@ -2829,23 +2536,18 @@ exports.applyContinuationAction = async (req, res) => {
         extensionCount: Number(project.buildPhase?.extensionCount || 0) + 1,
         extensionDaysGranted: Number(project.buildPhase?.extensionDaysGranted || 0) + 7
       }
-      activity = 'Chose continuation path: Extend MVP'
-    } else if (action === 'launch_beta') {
-      nextStage = 'growth'
-      momentumStatus = 'preparing_launch'
-      readinessDelta = 6
-      activity = 'Chose continuation path: Launch Beta'
+      activity = 'Chose next step: Refine MVP'
     } else if (action === 'archive_venture') {
       nextStage = 'archived'
       momentumStatus = 'pivoting'
       readinessDelta = 0
-      activity = 'Chose continuation path: Archive Venture'
+      activity = 'Chose next step: Archive Venture'
     } else {
       return res.status(400).json({ message: 'Unknown continuation action' })
     }
 
     if (currentStage !== nextStage && !canTransitionLifecycle(currentStage, nextStage)) {
-      const relaxedContinuationTargets = new Set(['team_formation', 'validation', 'mvp', 'growth', 'pivoted', 'archived'])
+      const relaxedContinuationTargets = new Set(['planning', 'building', 'validation', 'mvp', 'pivoted', 'archived'])
       if (!relaxedContinuationTargets.has(nextStage)) {
         return res.status(400).json({ message: `Cannot move from ${getLifecycleLabel(currentStage)} to ${getLifecycleLabel(nextStage)}` })
       }

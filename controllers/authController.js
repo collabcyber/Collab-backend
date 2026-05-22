@@ -40,32 +40,6 @@ const passwordIsStrong = (password) => {
 
 const getOwnerEmail = () => process.env.OWNER_EMAIL?.toLowerCase().trim()
 
-const calculatePoints = (action) => {
-  const points = {
-    create_project: 15,
-    join_project: 8,
-    complete_project: 25,
-    validation_given: 3,
-    helpful_feedback: 5,
-    inactivity_penalty: -10
-  }
-  return points[action] || 0
-}
-
-const awardBadges = (user, action) => {
-  const badges = []
-  
-  if (user.projectsCreated >= 1) badges.push('🚀 Builder')
-  if (user.projectsJoined >= 3) badges.push('🤝 Collaborator')
-  if (user.validationsGiven >= 10) badges.push('🧠 Validator')
-  if (user.inactivePenalties === 0 && user.lastActive > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)) {
-    badges.push('🔥 Consistent')
-  }
-  if (user.points >= 100) badges.push('🏆 Top Performer')
-  
-  return badges
-}
-
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const getFrontendBaseUrl = () => {
   const base = process.env.FRONTEND_URL || 'https://collab-frontend-five.vercel.app'
@@ -105,6 +79,7 @@ const normalizeExecutionProfileInput = ({
 } = {}) => {
   const validCommitmentLevels = new Set([
     'Exploring',
+    'Team Member',
     'Casual Contributor',
     'Serious Builder',
     'Startup Founder'
@@ -114,7 +89,9 @@ const normalizeExecutionProfileInput = ({
   const goals = normalizedGoal ? [normalizedGoal.slice(0, 180)] : []
   const roles = normalizeStringList(executionRoles).slice(0, 10)
   const interests = normalizeStringList(industryInterests).slice(0, 15)
-  const nextCommitment = validCommitmentLevels.has(commitmentLevel) ? commitmentLevel : 'Exploring'
+  const nextCommitment = commitmentLevel === 'Casual Contributor'
+    ? 'Team Member'
+    : validCommitmentLevels.has(commitmentLevel) ? commitmentLevel : 'Exploring'
 
   return {
     goals,
@@ -151,15 +128,12 @@ const toUserPayload = (user) => ({
   id: user._id,
   name: user.name,
   email: user.email,
-  sprintStatus: user.sprintStatus || 'none',
   college: user.college ? { id: user.college._id, name: user.college.name, type: user.college.type } : null,
   college_id: user.college_id || user.college?._id,
   course: user.course,
   yearOfStudy: user.yearOfStudy,
   skills: user.skills,
   primaryCategory: user.primaryCategory,
-  points: user.points,
-  badges: user.badges,
   role: user.role,
   executionProfile: normalizeExecutionProfile(user.executionProfile)
 })

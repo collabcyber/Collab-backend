@@ -1,10 +1,9 @@
 const VENTURE_LIFECYCLE = [
   'idea',
-  'validation',
-  'team_formation',
-  'prototype',
+  'planning',
+  'building',
   'mvp',
-  'growth',
+  'validation',
   'incubation_ready',
   'pivoted',
   'archived'
@@ -12,11 +11,10 @@ const VENTURE_LIFECYCLE = [
 
 const LIFECYCLE_LABELS = {
   idea: 'Idea',
-  validation: 'Validation',
-  team_formation: 'Team Formation',
-  prototype: 'Prototype',
+  planning: 'Planning',
+  building: 'Building',
   mvp: 'MVP',
-  growth: 'Growth',
+  validation: 'Validation',
   incubation_ready: 'Incubation Ready',
   pivoted: 'Pivoted',
   archived: 'Archived'
@@ -29,43 +27,44 @@ const LIFECYCLE_INDEX = VENTURE_LIFECYCLE.reduce((acc, stage, index) => {
 
 const LINEAR_LIFECYCLE = [
   'idea',
-  'validation',
-  'team_formation',
-  'prototype',
+  'planning',
+  'building',
   'mvp',
-  'growth',
+  'validation',
   'incubation_ready'
 ]
 
 const LIFECYCLE_TRANSITIONS = {
-  idea: new Set(['validation', 'pivoted', 'archived']),
-  validation: new Set(['team_formation', 'pivoted', 'archived']),
-  team_formation: new Set(['prototype', 'pivoted', 'archived']),
-  prototype: new Set(['mvp', 'validation', 'pivoted', 'archived']),
-  mvp: new Set(['growth', 'incubation_ready', 'validation', 'pivoted', 'archived']),
-  growth: new Set(['incubation_ready', 'pivoted', 'archived']),
-  incubation_ready: new Set(['growth', 'pivoted', 'archived']),
-  pivoted: new Set(['validation', 'team_formation', 'prototype', 'mvp', 'growth', 'archived']),
+  idea: new Set(['planning', 'pivoted', 'archived']),
+  planning: new Set(['building', 'pivoted', 'archived']),
+  building: new Set(['mvp', 'validation', 'pivoted', 'archived']),
+  mvp: new Set(['validation', 'incubation_ready', 'pivoted', 'archived']),
+  validation: new Set(['incubation_ready', 'building', 'mvp', 'pivoted', 'archived']),
+  incubation_ready: new Set(['validation', 'pivoted', 'archived']),
+  pivoted: new Set(['planning', 'building', 'mvp', 'validation', 'archived']),
   archived: new Set([])
 }
 
 const LEGACY_STATUS_MAP = {
-  planning: 'idea',
-  building: 'prototype',
+  planning: 'planning',
+  building: 'building',
   completed: 'mvp',
-  validation: 'mvp',
+  validation: 'validation',
   validated: 'incubation_ready',
   validation_failed: 'pivoted',
+  team_formation: 'planning',
+  prototype: 'building',
+  growth: 'incubation_ready',
   archived: 'archived'
 }
 
 const LEGACY_PHASE_MAP = {
   problem: 'idea',
-  plan: 'validation',
-  build: 'prototype',
+  plan: 'planning',
+  build: 'building',
   mvp: 'mvp',
-  validation: 'mvp',
-  demo: 'growth'
+  validation: 'validation',
+  demo: 'mvp'
 }
 
 const VALID_LIFECYCLE = new Set(VENTURE_LIFECYCLE)
@@ -75,7 +74,9 @@ const toId = (value) => (value ? value.toString() : '')
 const normalizeLifecycleStage = (value, fallback = 'idea') => {
   if (typeof value !== 'string') return fallback
   const normalized = value.trim().toLowerCase()
-  return VALID_LIFECYCLE.has(normalized) ? normalized : fallback
+  return VALID_LIFECYCLE.has(normalized)
+    ? normalized
+    : LEGACY_STATUS_MAP[normalized] || LEGACY_PHASE_MAP[normalized] || fallback
 }
 
 const normalizeLifecycleFilter = (value, fallback = 'idea') => {
@@ -98,7 +99,7 @@ const getLifecycleProgress = (stage) => {
 
 const getNextLifecycleStage = (stage) => {
   const normalized = normalizeLifecycleStage(stage)
-  if (normalized === 'pivoted') return 'validation'
+  if (normalized === 'pivoted') return 'planning'
   if (normalized === 'archived' || normalized === 'incubation_ready') return null
   const index = LINEAR_LIFECYCLE.indexOf(normalized)
   if (index < 0 || index >= LINEAR_LIFECYCLE.length - 1) return null
@@ -144,15 +145,15 @@ const inferLifecycleStage = (project = {}) => {
   if (legacyStatus === 'archived') return 'archived'
   if (project.validation?.validationStatus === 'passed' || legacyStatus === 'validated') return 'incubation_ready'
   if (project.validation?.validationStatus === 'failed' || legacyStatus === 'validation_failed') return 'pivoted'
-  if (legacyStatus === 'validation') return 'mvp'
-  if (legacyPhase === 'demo') return 'growth'
+  if (legacyStatus === 'validation') return 'validation'
+  if (legacyPhase === 'demo') return 'mvp'
   if (legacyPhase === 'mvp') return 'mvp'
   if (legacyStatus === 'building' || legacyPhase === 'build') {
-    return hasFullTeam ? 'prototype' : 'team_formation'
+    return hasFullTeam ? 'building' : 'planning'
   }
-  if (legacyPhase === 'plan') return 'validation'
+  if (legacyPhase === 'plan') return 'planning'
   if (hasValidationWorkspaceData(project)) return 'validation'
-  if ((project.interestedUsers || []).length > 0 || contributorCount > 1) return 'team_formation'
+  if ((project.interestedUsers || []).length > 0 || contributorCount > 1) return 'planning'
   return LEGACY_STATUS_MAP[legacyStatus] || LEGACY_PHASE_MAP[legacyPhase] || 'idea'
 }
 

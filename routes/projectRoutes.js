@@ -7,10 +7,7 @@ const { z } = require('zod')
 const {
   createProject,
   getProjects,
-  getDiscoveryProjects,
   getProjectById,
-  joinProject,
-  respondToJoinRequest,
   addTeamMember,
   removeTeamMember,
   addProjectMessage,
@@ -22,9 +19,6 @@ const {
   startBuildPhase,
   completeProject,
   updateActivity,
-  submitReview,
-  markReviewHelpful,
-  getValidationProjects,
   getProjectOptions,
   updateProjectRequirements,
   updateProjectDetails,
@@ -39,6 +33,7 @@ const {
   createContributionLog,
   updateTeamCheckIn,
   getContinuationPlan,
+  getIncubationPacket,
   applyContinuationAction
 } = require('../controllers/projectController')
 const validate = require('../middleware/validate')
@@ -47,7 +42,6 @@ const {
   project,
   objectId,
   projectsQuery,
-  paginationQuery,
   emptyBody,
   milestone,
   contribution,
@@ -72,9 +66,7 @@ const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } })
 // Basic CRUD
 router.post('/', validate(project.createProjectBody), createProject)
 router.get('/', validate(z.object({ query: projectsQuery })), getProjects)
-router.get('/discovery', validate(z.object({ query: projectsQuery.passthrough() })), getDiscoveryProjects)
 router.get('/options', validate(emptyBody), getProjectOptions)
-router.get('/validation', validate(z.object({ query: paginationQuery.passthrough() })), getValidationProjects)
 router.get('/:id', validate(z.object({ params: z.object({ id: objectId }) })), getProjectById)
 router.delete('/:id', validate(z.object({ params: z.object({ id: objectId }) })), requireProjectOwner, deleteProject)
 router.put('/:id/details', validate(z.object({ params: z.object({ id: objectId }), body: project.updateProjectDetailsBody })), requireProjectOwner, updateProjectDetails)
@@ -89,11 +81,9 @@ router.post('/:id/update-activity', validate(z.object({ params: z.object({ id: o
 router.patch('/:id/team-checkin', validate(z.object({ params: z.object({ id: objectId }), body: checkIn.checkInBody })), requireTeamMember, updateTeamCheckIn)
 router.get('/:id/continuation', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, getContinuationPlan)
 router.post('/:id/continuation', validate(z.object({ params: z.object({ id: objectId }), body: checkIn.continuationBody })), requireTeamMember, applyContinuationAction)
+router.get('/:id/incubation-packet', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, getIncubationPacket)
 
 // Team Management
-router.post('/:id/join', validate(z.object({ params: z.object({ id: objectId }), body: project.joinRequestBody })), joinProject)
-router.post('/:id/interest', validate(z.object({ params: z.object({ id: objectId }), body: project.joinRequestBody })), joinProject)
-router.post('/:id/respond', validate(z.object({ params: z.object({ id: objectId }), body: project.respondRequestBody })), requireProjectOwner, respondToJoinRequest)
 router.post('/:id/add-member', validate(z.object({ params: z.object({ id: objectId }), body: project.addMemberBody })), requireProjectOwner, addTeamMember)
 router.post('/:id/remove-member', validate(z.object({ params: z.object({ id: objectId }), body: project.removeMemberBody })), requireProjectOwner, removeTeamMember)
 router.post('/:id/messages', validate(z.object({ params: z.object({ id: objectId }), body: project.messageBody })), requireTeamMember, addProjectMessage)
@@ -106,10 +96,6 @@ router.get('/:id/files/:fileId/download', validate(z.object({
   })
 })), downloadProjectFile)
 router.delete('/:id/files/:fileId', validate(z.object({ params: z.object({ id: objectId, fileId: z.string() }) })), requireTeamMember, deleteProjectFile)
-
-// Validation feedback
-router.post('/:id/review', validate(z.object({ params: z.object({ id: objectId }), body: project.validationSubmitBody })), submitReview)
-router.put('/:id/reviews/:reviewId/helpful', validate(z.object({ params: z.object({ id: objectId, reviewId: objectId }) })), requireProjectOwner, markReviewHelpful)
 
 // Milestones & execution logs
 router.get('/:id/milestones', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, getMilestones)

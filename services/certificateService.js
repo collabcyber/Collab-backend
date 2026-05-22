@@ -28,12 +28,22 @@ const buildVerificationUrl = (certificateId) => {
   return `${apiBase.replace(/\/$/, '')}/api/public/certificates/${certificateId}`
 }
 
-const generateCertificatePdf = async ({ userName, projectTitle, collegeName, issuedAt, certificateId }) => {
+const generateCertificatePdf = async ({
+  userName,
+  projectTitle,
+  collegeName,
+  issuedAt,
+  certificateId,
+  memberRole = 'Startup Team Member',
+  contributionSummary = 'Contributed to startup execution inside Collab.',
+  milestonesCompleted = 0,
+  stageAchieved = 'Validation'
+}) => {
   const uploadsRoot = path.join(__dirname, '..', 'uploads')
   const certificatesDir = path.join(uploadsRoot, 'certificates')
   ensureDir(certificatesDir)
 
-  const filename = `validation-certificate-${certificateId}.pdf`
+  const filename = `startup-execution-certificate-${certificateId}.pdf`
   const filePath = path.join(certificatesDir, filename)
 
   await new Promise((resolve, reject) => {
@@ -63,14 +73,16 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
     const nameSize = 34
     const nameY = Math.round(((certY + 14) + workY - nameSize) / 2) - 8
 
+    centerText('Startup Execution Certificate', pageHeight * 0.30, 24, 'Times-Bold')
     centerText('This certifies that', certY, 14)
     centerText(userName, nameY, nameSize, 'Times-Italic')
-    centerText('is actively working on the venture', workY, 13)
+    centerText(`served as ${memberRole} for the startup`, workY, 13)
     centerText(`"${projectTitle}"`, pageHeight * 0.60, 16, 'Times-Italic')
-    centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, pageHeight * 0.64, 12)
+    centerText(`Stage achieved: ${stageAchieved} | Milestones completed: ${milestonesCompleted}`, pageHeight * 0.64, 12)
+    centerText(contributionSummary, pageHeight * 0.68, 11)
 
     if (collegeName) {
-      centerText(`College: ${collegeName.toUpperCase()}`, pageHeight * 0.69, 12)
+      centerText(`College: ${collegeName.toUpperCase()}`, pageHeight * 0.74, 12)
     }
 
     const footerY1 = pageHeight * 0.90
@@ -90,20 +102,26 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
   }
 }
 
-const generateValidationCertificates = async ({ project, members }) => {
+const generateValidationCertificates = async ({ project, members, milestoneSummary = {}, contributionSummaries = new Map() }) => {
   const issuedAt = new Date()
   const certificates = []
 
   for (const member of members) {
     const certificateId = crypto.randomUUID()
     const userId = member._id || member.id || member
-    const userName = member.name || 'Team Contributor'
+    const userName = member.name || 'Team Member'
+    const role = userId?.toString?.() === project.owner?.toString?.() ? 'Startup Lead' : 'Startup Team Member'
+    const contributionSummary = contributionSummaries.get?.(userId?.toString?.()) || 'Contributed to startup execution, validation preparation, and incubation readiness work.'
     const result = await generateCertificatePdf({
-      userName: member.name || 'Team Contributor',
+      userName: member.name || 'Team Member',
       projectTitle: project.title,
       collegeName: project.college?.name,
       issuedAt,
-      certificateId
+      certificateId,
+      memberRole: role,
+      contributionSummary,
+      milestonesCompleted: milestoneSummary.completed || 0,
+      stageAchieved: project.lifecycleStage ? project.lifecycleStage.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) : 'Validation'
     })
     certificates.push({
       certificateId,

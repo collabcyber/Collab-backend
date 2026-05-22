@@ -47,7 +47,7 @@ exports.getCertificate = async (req, res) => {
           downloadUrl,
           user: certificate.user ? {
             id: certificate.user._id || certificate.user,
-            name: certificate.user.name || certificate.userName || 'Team Contributor'
+            name: certificate.user.name || certificate.userName || 'Team Member'
           } : undefined,
           project: certificate.project ? {
             id: certificate.project._id || certificate.project,
@@ -89,7 +89,7 @@ exports.getCertificate = async (req, res) => {
         downloadUrl,
         user: cert.user ? {
           id: cert.user._id || cert.user,
-          name: cert.user.name || 'Team Contributor'
+          name: cert.user.name || 'Team Member'
         } : undefined,
         project: {
           id: project._id,

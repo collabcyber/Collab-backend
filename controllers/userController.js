@@ -25,7 +25,8 @@ const normalizeStringList = (value) => {
 }
 
 const normalizeCommitment = (value) => {
-  const valid = new Set(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder'])
+  const valid = new Set(['Exploring', 'Team Member', 'Casual Contributor', 'Serious Builder', 'Startup Founder'])
+  if (value === 'Casual Contributor') return 'Team Member'
   return valid.has(value) ? value : 'Exploring'
 }
 
@@ -74,7 +75,6 @@ exports.getProfile = async (req, res) => {
       id: user._id,
       name: user.name,
       email: user.email,
-      sprintStatus: user.sprintStatus || 'none',
       college: user.college ? { id: user.college._id, name: user.college.name, type: user.college.type } : null,
       college_id: user.college_id || user.college?._id,
       course: user.course,
@@ -82,13 +82,9 @@ exports.getProfile = async (req, res) => {
       skills: user.skills,
       primaryCategory: user.primaryCategory,
       phone: user.phone || '',
-      points: user.points,
-      badges: user.badges,
       projectsCreated: user.projectsCreated,
       projectsJoined: user.projectsJoined,
       projectsCompleted: user.projectsCompleted,
-      validationsGiven: user.validationsGiven,
-      helpfulFeedback: user.helpfulFeedback,
       showContactToTeam: user.showContactToTeam,
       twoFactorEnabled: user.twoFactorEnabled,
       twoFactorPending: user.twoFactorPending,
@@ -197,68 +193,6 @@ exports.changePassword = async (req, res) => {
   }
 }
 
-exports.getLeaderboard = async (req, res) => {
-  try {
-    const { college, page = 1, limit = 50 } = req.query
-    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 50))
-    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
-
-    let query = {}
-    
-    if (college && college !== 'all') {
-      query.$or = [{ college }, { college_id: college }]
-    }
-
-    const users = await User.find(query)
-      .populate('college', 'name type')
-      .sort({ points: -1 })
-      .limit(parsedLimit)
-      .skip((parsedPage - 1) * parsedLimit)
-      .select('name points badges college')
-
-    const total = await User.countDocuments(query)
-
-    res.json({
-      users,
-      pagination: {
-        page: parsedPage,
-        limit: parsedLimit,
-        total,
-        pages: Math.ceil(total / parsedLimit)
-      }
-    })
-  } catch (error) {
-    console.error('Get leaderboard error:', error)
-    res.status(500).json({ message: 'Failed to fetch leaderboard' })
-  }
-}
-
-exports.getRank = async (req, res) => {
-  try {
-    const userId = req.user.userId
-    const user = await User.findById(userId).select('points college college_id')
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' })
-    }
-
-    const higherCount = await User.countDocuments({ points: { $gt: user.points } })
-    let collegeRank = null
-    const collegeId = user.college || user.college_id
-    if (collegeId) {
-      const higherCollege = await User.countDocuments({ $or: [{ college: collegeId }, { college_id: collegeId }], points: { $gt: user.points } })
-      collegeRank = higherCollege + 1
-    }
-
-    res.json({
-      rank: higherCount + 1,
-      collegeRank
-    })
-  } catch (error) {
-    console.error('Get rank error:', error)
-    res.status(500).json({ message: 'Failed to fetch rank' })
-  }
-}
-
 exports.getExecutionProfile = async (req, res) => {
   try {
     const userId = req.user.userId
@@ -327,7 +261,7 @@ exports.getExecutionProfile = async (req, res) => {
       completedMilestones.length > 0 ? 'Milestone execution' : '',
       resolvedBlockers > 0 ? 'Blocker resolution' : '',
       logs.length >= 5 ? 'Contribution consistency' : '',
-      projects.some((project) => ['mvp', 'growth', 'incubation_ready'].includes(project.lifecycleStage)) ? 'Startup progression' : '',
+      projects.some((project) => ['mvp', 'validation', 'incubation_ready'].includes(project.lifecycleStage)) ? 'Startup progression' : '',
       user.validationsGiven > 0 ? 'Validation feedback' : ''
     ].filter(Boolean)
 
@@ -752,13 +686,13 @@ exports.getAdminStats = async (req, res) => {
         {
           $group: {
             _id: null,
-            totalReviews: { $sum: { $ifNull: ['$validation.currentReviews', 0] } }
+            validationEvidence: { $sum: { $size: { $ifNull: ['$validation.workspace.evidence', []] } } }
           }
         }
       ])
     ])
 
-    const validationsRun = validationAgg?.[0]?.totalReviews || 0
+    const validationsRun = validationAgg?.[0]?.validationEvidence || 0
 
     res.json({
       stats: {
