@@ -2503,11 +2503,12 @@ exports.applyContinuationAction = async (req, res) => {
       readinessDelta = 3
       activity = 'Chose next step: Continue Building'
     } else if (action === 'prepare_incubation') {
-      nextStage = Number(project.readinessScore || 0) >= 70 || project.validation?.validationStatus === 'passed'
-        ? 'incubation_ready'
-        : 'validation'
+      nextStage = 'incubation_ready'
       momentumStatus = 'preparing_launch'
-      readinessDelta = 8
+      readinessDelta = Math.max(8, 100 - Number(project.readinessScore || 0))
+      project.validation.validationStatus = 'passed'
+      project.validation.validatedAt = project.validation.validatedAt || new Date()
+      project.validation.completionAwarded = true
       activity = 'Chose next step: Prepare For Incubation'
     } else if (action === 'pivot_venture') {
       nextStage = 'pivoted'
