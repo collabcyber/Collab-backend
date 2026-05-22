@@ -43,6 +43,29 @@ const UserSchema = new mongoose.Schema({
   helpfulFeedback: { type: Number, default: 0 },
   inactivePenalties: { type: Number, default: 0 },
   showContactToTeam: { type: Boolean, default: false },
+  executionProfile: {
+    goals: [{ type: String }],
+    roles: [{ type: String }],
+    commitmentLevel: {
+      type: String,
+      enum: ['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder'],
+      default: 'Exploring'
+    },
+    industryInterests: [{ type: String }],
+    contributionMetrics: {
+      milestonesCompleted: { type: Number, default: 0 },
+      contributionConsistency: { type: Number, default: 0 },
+      collaborationQuality: { type: Number, default: 0 },
+      executionReliability: { type: Number, default: 0 }
+    },
+    startupParticipationTimeline: [{
+      venture: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+      role: { type: String, default: '' },
+      joinedAt: { type: Date, default: Date.now },
+      exitedAt: { type: Date },
+      outcome: { type: String, default: '' }
+    }]
+  },
   lastActive: { type: Date, default: Date.now }
 }, { timestamps: true })
 

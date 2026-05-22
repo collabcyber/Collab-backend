@@ -4,6 +4,8 @@ const crypto = require('crypto')
 const mongoose = require('mongoose')
 const Project = require('../models/Project')
 const Checkpoint = require('../models/Checkpoint')
+const Milestone = require('../models/Milestone')
+const ContributionLog = require('../models/ContributionLog')
 const User = require('../models/User')
 const { createNotification } = require('./notificationController')
 const { applyUserStats, POINTS, computeBadges } = require('../utils/points')
@@ -11,6 +13,16 @@ const { submitValidation } = require('./validationController')
 const { sendEmail } = require('../services/emailService')
 const { generateValidationCertificates, buildVerificationUrl } = require('../services/certificateService')
 const { logSecurityEvent } = require('../middleware/securityLogger')
+const {
+  normalizeLifecycleStage,
+  normalizeLifecycleFilter,
+  getLifecycleLabel,
+  getLifecycleProgress,
+  getNextLifecycleStage,
+  inferLifecycleStage,
+  canTransitionLifecycle,
+  updateLifecycleStage
+} = require('../utils/ventureLifecycle')
 
 const toId = (value) => (value ? value.toString() : '')
 const SPRINT_PHASES = ['problem', 'plan', 'build', 'mvp', 'validation', 'demo']
@@ -22,6 +34,16 @@ const FILE_LINK_TTL_SECONDS = Math.max(60, parseInt(process.env.FILE_LINK_TTL_SE
 const FILE_ACCESS_SECRET = process.env.FILE_ACCESS_SECRET || process.env.JWT_SECRET || 'collab-file-access-secret'
 const PUBLIC_API_BASE = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
 const PROJECT_VISIBILITY = new Set(['private', 'college', 'global'])
+const REVIEWABLE_LIFECYCLE_STAGES = new Set(['prototype', 'mvp', 'growth'])
+const PUBLIC_VALIDATION_STATES = new Set(['in_review', 'passed', 'failed'])
+const ACTIVE_LIFECYCLE_STAGES = new Set(['idea', 'validation', 'team_formation', 'prototype', 'mvp', 'growth', 'pivoted'])
+const TEAM_CHECK_IN_OPTIONS = new Set([
+  'strong_momentum',
+  'facing_blockers',
+  'need_contributors',
+  'pivoting',
+  'preparing_launch'
+])
 
 const createIdeaFingerprint = ({ title, shortPitch, description, executionPlan, category, ownerId }) => {
   const normalized = [
@@ -184,6 +206,139 @@ const normalizeValidationEvidence = (items) => {
     .slice(0, 300)
 }
 
+const normalizeMomentumStatus = (value) => {
+  if (TEAM_CHECK_IN_OPTIONS.has(value)) return value
+  return 'need_contributors'
+}
+
+const getProjectLifecycle = (project) => normalizeLifecycleStage(project?.lifecycleStage || inferLifecycleStage(project))
+
+const setProjectLifecycle = (project, nextStage) => updateLifecycleStage(project, nextStage)
+
+const isValidationReviewOpen = (project) => project?.validation?.validationStatus === 'in_review'
+
+const isValidationOutcomeFailed = (project) => project?.validation?.validationStatus === 'failed'
+
+const isValidationOutcomePassed = (project) =>
+  project?.validation?.validationStatus === 'passed' || getProjectLifecycle(project) === 'incubation_ready'
+
+const toReadinessScore = (value, fallback = 0) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return Math.max(0, Math.min(100, Math.round(fallback)))
+  return Math.max(0, Math.min(100, Math.round(numeric)))
+}
+
+const normalizeBlockers = (value) => {
+  const list = Array.isArray(value) ? value : value ? [value] : []
+  const cleaned = list
+    .map((item) => (typeof item === 'string' ? item.trim() : String(item || '').trim()))
+    .filter(Boolean)
+    .slice(0, 20)
+  return [...new Set(cleaned)]
+}
+
+const normalizeDependencyIds = (value) => {
+  const list = Array.isArray(value) ? value : value ? [value] : []
+  return [...new Set(
+    list
+      .map((item) => (typeof item === 'string' ? item : String(item || '')).trim())
+      .filter((item) => mongoose.Types.ObjectId.isValid(item))
+  )].slice(0, 20)
+}
+
+const normalizeBlockerDetails = (value, requesterId) => {
+  const validTypes = new Set(['technical', 'design', 'validation', 'contributor'])
+  const validStatuses = new Set(['open', 'resolved'])
+  const list = Array.isArray(value) ? value : []
+
+  return list
+    .map((item) => {
+      const description = normalizePlainText(item?.description || '', 500)
+      if (!description) return null
+      const status = validStatuses.has(item?.status) ? item.status : 'open'
+      const resolvedAt = status === 'resolved'
+        ? (item?.resolvedAt ? new Date(item.resolvedAt) : new Date())
+        : undefined
+
+      return {
+        blockerId: normalizePlainText(item?.blockerId || '', 80) || new mongoose.Types.ObjectId().toString(),
+        type: validTypes.has(item?.type) ? item.type : 'technical',
+        description,
+        status,
+        createdBy: item?.createdBy || requesterId,
+        createdAt: item?.createdAt ? new Date(item.createdAt) : new Date(),
+        resolvedAt: resolvedAt && !Number.isNaN(resolvedAt.getTime()) ? resolvedAt : undefined
+      }
+    })
+    .filter(Boolean)
+    .slice(0, 50)
+}
+
+const getOpenBlockerCount = (milestones = []) => milestones.reduce((count, milestone) => {
+  const textBlockers = Array.isArray(milestone.blockers) ? milestone.blockers.length : 0
+  const typedBlockers = Array.isArray(milestone.blockerDetails)
+    ? milestone.blockerDetails.filter((blocker) => blocker.status !== 'resolved').length
+    : 0
+  return count + textBlockers + typedBlockers
+}, 0)
+
+const getContinuationRecommendations = ({ project, milestones = [] }) => {
+  const lifecycleStage = getProjectLifecycle(project)
+  const openBlockers = getOpenBlockerCount(milestones)
+  const completedMilestones = milestones.filter((milestone) => milestone.status === 'completed').length
+  const readinessScore = Number(project?.readinessScore || 0)
+  const validationStatus = project?.validation?.validationStatus || 'pending'
+  const recommendations = []
+
+  if (openBlockers > 0) recommendations.push('Resolve active blockers before increasing scope.')
+  if (project?.teamMembers?.length < Math.max(1, Number(project?.numberOfTeammates || 1))) {
+    recommendations.push('Recruit contributors for the roles still missing.')
+  }
+  if (['idea', 'validation'].includes(lifecycleStage)) {
+    recommendations.push('Turn assumptions into validation tasks and evidence.')
+  }
+  if (['prototype', 'mvp'].includes(lifecycleStage) && completedMilestones < 2) {
+    recommendations.push('Create concrete prototype and MVP milestones with owners.')
+  }
+  if (validationStatus === 'failed' || lifecycleStage === 'pivoted') {
+    recommendations.push('Use feedback to pivot or relaunch validation with sharper evidence.')
+  }
+  if (readinessScore >= 75 || lifecycleStage === 'growth') {
+    recommendations.push('Prepare incubation materials and beta launch evidence.')
+  }
+  if (recommendations.length === 0) recommendations.push('Continue building toward the next lifecycle milestone.')
+
+  return recommendations
+}
+
+const buildContinuationPlan = ({ project, milestones = [] }) => ({
+  lifecycleStage: getProjectLifecycle(project),
+  readinessScore: toReadinessScore(project?.readinessScore || 0),
+  momentumStatus: project?.momentumStatus || 'need_contributors',
+  recommendations: getContinuationRecommendations({ project, milestones }),
+  paths: [
+    { action: 'continue_building', label: 'Continue Building', targetStage: getProjectLifecycle(project) },
+    { action: 'prepare_incubation', label: 'Prepare For Incubation', targetStage: 'incubation_ready' },
+    { action: 'recruit_contributors', label: 'Recruit Contributors', targetStage: 'team_formation' },
+    { action: 'pivot_venture', label: 'Pivot Venture', targetStage: 'pivoted' },
+    { action: 'relaunch_validation', label: 'Relaunch Validation', targetStage: 'validation' },
+    { action: 'extend_mvp', label: 'Extend MVP', targetStage: 'mvp' },
+    { action: 'launch_beta', label: 'Launch Beta', targetStage: 'growth' },
+    { action: 'archive_venture', label: 'Archive Venture', targetStage: 'archived' }
+  ]
+})
+
+const logContribution = async ({ projectId, contributor, milestoneId, action, impact }) => {
+  if (!projectId || !contributor || !action) return null
+  return ContributionLog.create({
+    projectId,
+    contributor,
+    milestoneId: milestoneId && mongoose.Types.ObjectId.isValid(milestoneId) ? milestoneId : undefined,
+    action: String(action).trim().slice(0, 200),
+    impact: typeof impact === 'string' ? impact.trim().slice(0, 1000) : ''
+  })
+}
+
 const isViewerTeamMember = (project, viewerId) => {
   if (!viewerId) return false
   return (project.teamMembers || []).some((member) => toId(member._id || member) === viewerId)
@@ -216,10 +371,10 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
   }
 
   if (!isPrivilegedViewer) {
-      project.teamMembers = (project.teamMembers || []).map((member) => ({
-        _id: member._id,
-        name: member.name || 'Contributor'
-      }))
+    project.teamMembers = (project.teamMembers || []).map((member) => ({
+      _id: member._id,
+      name: member.name || 'Contributor'
+    }))
 
     // Keep external view focused on a public summary, not the implementation details.
     project.executionPlan = undefined
@@ -231,7 +386,7 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
 
     project.files = []
     project.messages = []
-    if (!['validation', 'validated', 'validation_failed'].includes(project.status) && project.validation) {
+    if (!PUBLIC_VALIDATION_STATES.has(project.validation?.validationStatus) && project.validation) {
       project.validation.sharedFiles = []
     }
     if (project.owner) {
@@ -357,11 +512,19 @@ exports.createProject = async (req, res) => {
       },
       owner: userId,
       teamMembers: [userId],
-      status: 'planning',
+      lifecycleStage: 'idea',
+      readinessScore: 10,
+      momentumStatus: 'need_contributors',
+      teamCheckIn: {
+        status: 'need_contributors',
+        note: 'Need contributors to move this venture forward.',
+        updatedAt: new Date(),
+        updatedBy: userId
+      },
       buildPhase: {
-        startDate: new Date(),
-        endDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-        isActive: true,
+        startDate: undefined,
+        endDate: undefined,
+        isActive: false,
         lastActivity: new Date(),
         totalDurationDays: 14,
         isExtendedTimeline: false,
@@ -376,6 +539,13 @@ exports.createProject = async (req, res) => {
     })
 
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: userId,
+      action: 'Created venture workspace',
+      impact: 'Initialized venture lifecycle at idea stage.'
+    })
 
     await applyUserStats(userId, {
       points: POINTS.create_project,
@@ -396,7 +566,7 @@ exports.createProject = async (req, res) => {
 
 exports.getProjects = async (req, res) => {
   try {
-    const { college, category, skills, status, roles, page = 1, limit = 20 } = req.query
+    const { college, category, skills, status, lifecycleStage, roles, page = 1, limit = 20 } = req.query
     const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
     const parsedPage = Math.max(1, parseInt(page, 10) || 1)
     const filter = {}
@@ -416,10 +586,11 @@ exports.getProjects = async (req, res) => {
     }
     filter.$or = visibilityFilter
 
-    if (typeof status === 'string' && status && status !== 'all') {
-      filter.status = status
+    const lifecycleFilter = lifecycleStage || status
+    if (typeof lifecycleFilter === 'string' && lifecycleFilter && lifecycleFilter !== 'all') {
+      filter.lifecycleStage = normalizeLifecycleFilter(lifecycleFilter)
     } else {
-      filter.status = { $ne: 'archived' }
+      filter.lifecycleStage = { $ne: 'archived' }
     }
 
     if (college && college !== 'all') {
@@ -490,6 +661,113 @@ exports.getProjects = async (req, res) => {
   }
 }
 
+exports.getDiscoveryProjects = async (req, res) => {
+  try {
+    const userId = req.user?.userId
+    const {
+      lifecycleStage,
+      category,
+      roles,
+      momentumStatus,
+      minReadiness,
+      page = 1,
+      limit = 24
+    } = req.query
+    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 24))
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1)
+    const viewer = userId ? await User.findById(userId).select('college college_id skills primaryCategory executionProfile').lean() : null
+    const viewerCollege = viewer?.college || viewer?.college_id
+    const viewerSkills = new Set((viewer?.skills || []).map((skill) => String(skill).toLowerCase()))
+    const viewerRoles = new Set((viewer?.executionProfile?.roles || []).map((role) => String(role).toLowerCase()))
+    const filter = {
+      lifecycleStage: { $ne: 'archived' },
+      $or: [
+        { visibility: 'global' },
+        ...(viewerCollege ? [{ visibility: 'college', college: viewerCollege }] : []),
+        ...(userId ? [{ owner: userId }, { teamMembers: userId }] : [])
+      ]
+    }
+
+    if (lifecycleStage && lifecycleStage !== 'all') {
+      filter.lifecycleStage = normalizeLifecycleFilter(lifecycleStage)
+    }
+    if (category && category !== 'all') filter.category = category
+    if (momentumStatus && momentumStatus !== 'all') filter.momentumStatus = normalizeMomentumStatus(momentumStatus)
+    if (Number.isFinite(Number(minReadiness))) {
+      filter.readinessScore = { $gte: Math.max(0, Math.min(100, Number(minReadiness))) }
+    }
+    if (roles && roles !== 'all') {
+      const roleRegex = new RegExp(String(roles).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      filter.rolesNeeded = roleRegex
+    }
+
+    const projects = await Project.find(filter)
+      .populate('owner', 'name email')
+      .populate('teamMembers', 'name email skills executionProfile')
+      .sort({ readinessScore: -1, updatedAt: -1 })
+      .limit(parsedLimit)
+      .skip((parsedPage - 1) * parsedLimit)
+      .lean()
+
+    const projectIds = projects.map((project) => project._id)
+    const [milestoneCounts, logCounts, total] = await Promise.all([
+      Milestone.aggregate([
+        { $match: { projectId: { $in: projectIds } } },
+        {
+          $group: {
+            _id: '$projectId',
+            total: { $sum: 1 },
+            completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            blocked: { $sum: { $cond: [{ $eq: ['$status', 'blocked'] }, 1, 0] } }
+          }
+        }
+      ]),
+      ContributionLog.aggregate([
+        { $match: { projectId: { $in: projectIds } } },
+        { $group: { _id: '$projectId', total: { $sum: 1 }, lastActivity: { $max: '$timestamp' } } }
+      ]),
+      Project.countDocuments(filter)
+    ])
+
+    const milestoneMap = new Map(milestoneCounts.map((item) => [item._id.toString(), item]))
+    const logMap = new Map(logCounts.map((item) => [item._id.toString(), item]))
+    const ventures = projects.map((project) => {
+      const skillMatches = (project.skillsRequired || []).filter((skill) => viewerSkills.has(String(skill).toLowerCase())).length
+      const roleMatches = (project.rolesNeeded || []).filter((role) => viewerRoles.has(String(role).toLowerCase())).length
+      const categoryMatch = viewer?.primaryCategory && project.category === viewer.primaryCategory ? 1 : 0
+      const sameCollege = viewerCollege && project.college && viewerCollege.toString() === project.college.toString() ? 1 : 0
+      const neededSlots = Math.max(0, Number(project.numberOfTeammates || 1) - (project.teamMembers || []).length)
+      const rawScore = (skillMatches * 18) + (roleMatches * 22) + (categoryMatch * 12) + (sameCollege * 8) + (neededSlots > 0 ? 12 : 0)
+      const projectId = project._id.toString()
+
+      return {
+        ...project,
+        discovery: {
+          matchScore: Math.max(0, Math.min(100, rawScore)),
+          skillMatches,
+          roleMatches,
+          neededSlots,
+          milestoneSummary: milestoneMap.get(projectId) || { total: 0, completed: 0, blocked: 0 },
+          activitySummary: logMap.get(projectId) || { total: 0, lastActivity: project.updatedAt }
+        }
+      }
+    })
+
+    res.json({
+      ventures,
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total,
+        pages: Math.ceil(total / parsedLimit)
+      }
+    })
+  } catch (error) {
+    console.error('Get discovery ventures error:', error)
+    res.status(500).json({ message: 'Failed to fetch discovery ventures' })
+  }
+}
+
 exports.getValidationProjects = async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query
@@ -497,13 +775,14 @@ exports.getValidationProjects = async (req, res) => {
     const parsedPage = Math.max(1, parseInt(page, 10) || 1)
     const viewerId = req.user?.userId ? req.user.userId.toString() : ''
 
-    const projects = await Project.find({ status: 'validation' })
+    const filter = { 'validation.validationStatus': 'in_review' }
+    const projects = await Project.find(filter)
       .populate('owner', 'name')
       .sort({ updatedAt: -1 })
       .limit(parsedLimit)
       .skip((parsedPage - 1) * parsedLimit)
 
-    const total = await Project.countDocuments({ status: 'validation' })
+    const total = await Project.countDocuments(filter)
     const sanitizedProjects = projects.map((project) => sanitizeProjectForViewer(project, viewerId))
 
     res.json({
@@ -590,7 +869,7 @@ exports.getProjectProof = async (req, res) => {
     const { id } = req.params
 
     const project = await Project.findById(id)
-      .select('title shortPitch description phase status teamMembers owner')
+      .select('title shortPitch description lifecycleStage readinessScore momentumStatus teamMembers owner')
       .populate('owner', 'name')
       .populate('teamMembers', 'name')
       .lean()
@@ -609,6 +888,12 @@ exports.getProjectProof = async (req, res) => {
       return new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime()
     })
 
+    const milestones = await Milestone.find({ projectId: id })
+      .select('title status dueDate owner')
+      .populate('owner', 'name')
+      .sort({ dueDate: 1, createdAt: -1 })
+      .lean()
+
     const membersMap = new Map()
     const ownerId = toId(project.owner?._id || project.owner)
     const ownerName = project.owner?.name || 'Owner'
@@ -624,22 +909,34 @@ exports.getProjectProof = async (req, res) => {
       }
     })
 
-    const phaseStatus = SPRINT_PHASES.includes(project.phase) ? project.phase : 'problem'
-    const completed = phaseStatus === 'demo' && ['validated', 'completed'].includes(String(project.status || '').toLowerCase())
+    const lifecycleStage = getProjectLifecycle(project)
 
     return res.json({
       id: project._id,
       title: project.title,
       description: project.shortPitch || project.description || '',
       teamMembers: Array.from(membersMap.values()),
+      lifecycleStage,
+      lifecycleLabel: getLifecycleLabel(lifecycleStage),
+      lifecycleProgress: getLifecycleProgress(lifecycleStage),
+      nextLifecycleStage: getNextLifecycleStage(lifecycleStage),
+      readinessScore: toReadinessScore(project.readinessScore, 0),
+      momentumStatus: project.momentumStatus || 'need_contributors',
       checkpoints: checkpoints.map((checkpoint) => ({
         phase: checkpoint.phase,
         submissionLink: checkpoint.submissionLink,
         description: checkpoint.description || '',
         submittedAt: checkpoint.submittedAt
       })),
-      finalPhaseStatus: completed ? 'completed' : 'in_progress',
-      currentPhase: phaseStatus
+      milestones: milestones.map((milestone) => ({
+        id: milestone._id,
+        title: milestone.title,
+        status: milestone.status,
+        dueDate: milestone.dueDate,
+        owner: milestone.owner?.name || null
+      })),
+      finalLifecycleStatus: lifecycleStage === 'incubation_ready' ? 'completed' : 'in_progress',
+      currentLifecycleStage: lifecycleStage
     })
   } catch (error) {
     console.error('Get venture proof error:', error)
@@ -691,7 +988,16 @@ exports.joinProject = async (req, res) => {
     }
 
     project.interestedUsers.push(userId)
+    project.momentumStatus = 'need_contributors'
+    setProjectLifecycle(project, 'team_formation')
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: userId,
+      action: 'Applied to contribute',
+      impact: 'Contributor application submitted to venture lead.'
+    })
 
     const requester = await User.findById(userId).select('name email')
     if (requester) {
@@ -809,11 +1115,19 @@ exports.addTeamMember = async (req, res) => {
     project.interestedUsers = project.interestedUsers.filter((uid) => uid.toString() !== userId.toString())
 
     const teamCount = (project.teamMembers || []).length
-    if (teamCount >= maxTeamMembers && project.status === 'planning') {
+    if (teamCount >= maxTeamMembers && ['idea', 'validation', 'team_formation'].includes(getProjectLifecycle(project))) {
       if (!project.buildPhase) {
         project.buildPhase = {}
       }
-      project.status = 'building'
+      setProjectLifecycle(project, 'prototype')
+      project.momentumStatus = 'strong_momentum'
+      project.readinessScore = toReadinessScore(project.readinessScore, 28)
+      project.teamCheckIn = {
+        status: 'strong_momentum',
+        note: 'Startup team formed. Build execution started.',
+        updatedAt: new Date(),
+        updatedBy: requesterId
+      }
       project.buildPhase.startDate = new Date()
       project.buildPhase.endDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
       project.buildPhase.isActive = true
@@ -843,6 +1157,13 @@ exports.addTeamMember = async (req, res) => {
     }
 
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Added contributor to startup team',
+      impact: `${teamCount}/${maxTeamMembers} team slots filled.`
+    })
 
     await applyUserStats(userId, {
       points: POINTS.join_project,
@@ -924,7 +1245,35 @@ exports.updateProjectRequirements = async (req, res) => {
       project.skillsRequired = normalizeLabelList(skillsRequired)
     }
 
+    const updatedTeamCount = (project.teamMembers || []).length
+    if (updatedTeamCount < (project.numberOfTeammates || 1)) {
+      project.momentumStatus = 'need_contributors'
+      setProjectLifecycle(project, 'team_formation')
+      project.teamCheckIn = {
+        status: 'need_contributors',
+        note: 'Additional contributors required to hit target team size.',
+        updatedAt: new Date(),
+        updatedBy: requesterId
+      }
+    } else if (['prototype', 'mvp', 'growth'].includes(getProjectLifecycle(project))) {
+      project.momentumStatus = 'strong_momentum'
+      setProjectLifecycle(project, getProjectLifecycle(project))
+      project.teamCheckIn = {
+        status: 'strong_momentum',
+        note: 'Team capacity reached and build execution is active.',
+        updatedAt: new Date(),
+        updatedBy: requesterId
+      }
+    }
+
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Updated venture team requirements',
+      impact: `Roles: ${(project.rolesNeeded || []).length}, Skills: ${(project.skillsRequired || []).length}, Team size: ${project.numberOfTeammates}.`
+    })
 
     const populated = await Project.findById(project._id)
       .populate('owner', 'name email')
@@ -1011,6 +1360,13 @@ exports.updateProjectDetails = async (req, res) => {
 
     await project.save()
 
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Updated venture brief',
+      impact: 'Refined title/pitch/plan in workspace settings.'
+    })
+
     const populated = await Project.findById(project._id)
       .populate('owner', 'name email')
       .populate('teamMembers', 'name email')
@@ -1087,12 +1443,20 @@ exports.updateValidationWorkspace = async (req, res) => {
       }
     }
 
-    await project.save()
-
     const workspace = project.validation.workspace || {}
     const tasks = workspace.tasks || []
     const evidence = workspace.evidence || []
     const completedTasks = tasks.filter((task) => task.status === 'completed').length
+    const taskScore = tasks.length > 0 ? (completedTasks / tasks.length) * 55 : 0
+    const evidenceScore = Math.min(25, evidence.length * 5)
+    const confidencePart = Math.min(20, Math.max(0, Number(workspace.confidenceScore || 0)) * 0.2)
+    const blendedReadiness = toReadinessScore(taskScore + evidenceScore + confidencePart, project.readinessScore)
+    project.readinessScore = Math.max(project.readinessScore || 0, blendedReadiness)
+    setProjectLifecycle(project, 'validation')
+    project.momentumStatus = tasks.length === 0 ? 'need_contributors' : 'strong_momentum'
+
+    await project.save()
+
     const pendingTasks = Math.max(0, tasks.length - completedTasks)
 
     const timeline = [
@@ -1112,6 +1476,13 @@ exports.updateValidationWorkspace = async (req, res) => {
       .filter((entry) => entry.at)
       .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
       .slice(0, 50)
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Updated validation workspace',
+      impact: `Tasks: ${tasks.length}, Evidence: ${evidence.length}, Confidence: ${workspace.confidenceScore || 0}%`
+    })
 
     return res.json({
       message: 'Validation workspace updated',
@@ -1160,7 +1531,27 @@ exports.removeTeamMember = async (req, res) => {
     }
 
     project.teamMembers = project.teamMembers.filter((uid) => uid.toString() !== userId.toString())
+    const nextTeamCount = (project.teamMembers || []).length
+    if (nextTeamCount < (project.numberOfTeammates || 1)) {
+      project.momentumStatus = 'need_contributors'
+      project.teamCheckIn = {
+        status: 'need_contributors',
+        note: 'Team size dropped below target; new contributors required.',
+        updatedAt: new Date(),
+        updatedBy: requesterId
+      }
+      if (['prototype', 'mvp', 'growth'].includes(getProjectLifecycle(project))) {
+        setProjectLifecycle(project, 'team_formation')
+      }
+    }
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Removed contributor from startup team',
+      impact: `Team size adjusted to ${nextTeamCount}/${project.numberOfTeammates || 1}.`
+    })
 
     const populated = await Project.findById(project._id)
       .populate('owner', 'name email')
@@ -1202,8 +1593,17 @@ exports.addProjectMessage = async (req, res) => {
     }
 
     project.messages.push({ sender: userId, text: text.trim() })
+    if (!project.buildPhase) project.buildPhase = {}
     project.buildPhase.lastActivity = new Date()
+    setProjectLifecycle(project, getProjectLifecycle(project))
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: userId,
+      action: 'Posted build update',
+      impact: text.trim().slice(0, 180)
+    })
 
     const messageText = text.trim().toLowerCase()
     if (messageText.includes('@')) {
@@ -1268,7 +1668,11 @@ exports.updateActivity = async (req, res) => {
       return res.status(403).json({ message: 'Only team contributors can update activity' })
     }
 
+    if (!project.buildPhase) project.buildPhase = {}
     project.buildPhase.lastActivity = new Date()
+    project.momentumStatus = 'strong_momentum'
+    setProjectLifecycle(project, getProjectLifecycle(project))
+    project.readinessScore = toReadinessScore((project.readinessScore || 0) + 1, project.readinessScore)
     await project.save()
 
     res.json({ message: 'Activity updated' })
@@ -1295,7 +1699,7 @@ exports.deleteProject = async (req, res) => {
     const ownerId = project.owner.toString()
     const teamIds = (project.teamMembers || []).map((member) => member.toString())
     const uniqueUserIds = Array.from(new Set([ownerId, ...teamIds]))
-    const shouldDeductComplete = ['completed', 'validated'].includes(project.status)
+    const shouldDeductComplete = getProjectLifecycle(project) === 'incubation_ready'
 
     for (const userId of uniqueUserIds) {
       const user = await User.findById(userId)
@@ -1317,6 +1721,8 @@ exports.deleteProject = async (req, res) => {
       await user.save()
     }
 
+    await Milestone.deleteMany({ projectId: id })
+    await ContributionLog.deleteMany({ projectId: id })
     await Project.deleteOne({ _id: id })
 
     res.json({ message: 'Venture deleted successfully' })
@@ -1475,7 +1881,7 @@ exports.downloadProjectFile = async (req, res) => {
       return res.status(404).json({ message: 'File not found' })
     }
 
-    const validationVisible = ['validation', 'validated', 'validation_failed'].includes(project.status)
+    const validationVisible = PUBLIC_VALIDATION_STATES.has(project.validation?.validationStatus)
     const canAccessAsValidator = Boolean(fileInValidation && validationVisible)
     if (!isOwner && !isTeamMember && !canAccessAsValidator) {
       logSecurityEvent('file_access_denied', req, {
@@ -1523,7 +1929,15 @@ exports.startBuildPhase = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can start the build phase' })
     }
 
-    project.status = 'building'
+    setProjectLifecycle(project, 'prototype')
+    project.momentumStatus = 'strong_momentum'
+    project.teamCheckIn = {
+      status: 'strong_momentum',
+      note: 'Build phase activated.',
+      updatedAt: new Date(),
+      updatedBy: requesterId
+    }
+    project.readinessScore = toReadinessScore(project.readinessScore, 30)
     project.buildPhase = {
       startDate: new Date(),
       endDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
@@ -1537,6 +1951,13 @@ exports.startBuildPhase = async (req, res) => {
     }
 
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Started build phase',
+      impact: 'Venture moved into prototype execution stage.'
+    })
 
     res.json({ message: 'Build phase started', project })
   } catch (error) {
@@ -1559,7 +1980,7 @@ exports.completeProject = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can complete the venture' })
     }
 
-    if (project.status === 'validated') {
+    if (isValidationOutcomePassed(project)) {
       return res.status(400).json({ message: 'Venture is already validated' })
     }
 
@@ -1603,22 +2024,29 @@ exports.startValidation = async (req, res) => {
       return res.status(400).json({ message: 'Time limit expired' })
     }
 
-    if (project.status === 'validation' || project.status === 'validated') {
+    if (isValidationReviewOpen(project) || isValidationOutcomePassed(project)) {
       return res.status(400).json({ message: 'Venture already in validation' })
     }
 
-    if (project.status === 'validation_failed') {
+    if (isValidationOutcomeFailed(project)) {
       return res.status(400).json({
         message: 'This venture needs rework. Use the extend timeline option before sending it to validation again.'
       })
     }
 
-    if (!['building', 'completed'].includes(project.status)) {
-      return res.status(400).json({ message: 'Venture must be in build phase before validation' })
+    const lifecycleStage = getProjectLifecycle(project)
+    if (!REVIEWABLE_LIFECYCLE_STAGES.has(lifecycleStage)) {
+      return res.status(400).json({ message: 'Venture must reach Prototype, MVP, or Growth before external validation review' })
     }
 
-    const previousStatus = project.status
-    project.status = 'validation'
+    setProjectLifecycle(project, lifecycleStage === 'prototype' ? 'mvp' : lifecycleStage)
+    project.momentumStatus = 'strong_momentum'
+    project.teamCheckIn = {
+      status: 'strong_momentum',
+      note: 'Validation discovery started with real user feedback collection.',
+      updatedAt: new Date(),
+      updatedBy: requesterId
+    }
     project.buildPhase.isActive = false
     if (!project.validation) {
       project.validation = {}
@@ -1649,13 +2077,10 @@ exports.startValidation = async (req, res) => {
       verdict: { pass: 0, rework: 0, hold: 0 }
     }
     project.validation.reviews = []
-    project.validation.validationStatus = 'pending'
+    project.validation.validationStatus = 'in_review'
     project.validation.validatedAt = undefined
     project.validation.featuredAt = undefined
     project.validation.lastFailureReason = undefined
-    if (previousStatus === 'completed' && !project.validation.completionAwarded) {
-      project.validation.completionAwarded = true
-    }
     if (typeof demoLink === 'string') {
       project.validation.demoLink = demoLink.trim()
     }
@@ -1690,6 +2115,13 @@ exports.startValidation = async (req, res) => {
     project.validation.certificates = certificates
 
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Moved venture to validation',
+      impact: 'Validation workflow activated inside venture workspace.'
+    })
 
     const apiBase = (process.env.PUBLIC_API_BASE || 'https://api.collab.qzz.io').replace(/\/$/, '')
     const certMap = new Map(certificates.map((cert) => [toId(cert.user), cert]))
@@ -1762,7 +2194,7 @@ exports.removeFromValidation = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can update validation status' })
     }
 
-    if (project.status !== 'validation') {
+    if (!isValidationReviewOpen(project)) {
       return res.status(400).json({ message: 'Venture is not in validation' })
     }
 
@@ -1770,7 +2202,14 @@ exports.removeFromValidation = async (req, res) => {
     const existingEndDate = project.buildPhase?.endDate ? new Date(project.buildPhase.endDate).getTime() : 0
     const hasRemainingTime = existingEndDate > now
 
-    project.status = 'building'
+    setProjectLifecycle(project, 'pivoted')
+    project.momentumStatus = 'facing_blockers'
+    project.teamCheckIn = {
+      status: 'facing_blockers',
+      note: 'Returned from validation to address feedback and blockers.',
+      updatedAt: new Date(),
+      updatedBy: requesterId
+    }
     if (!project.buildPhase) {
       project.buildPhase = {}
     }
@@ -1827,6 +2266,13 @@ exports.removeFromValidation = async (req, res) => {
 
     await project.save()
 
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Returned venture to build stage',
+      impact: 'Validation feedback now being addressed.'
+    })
+
     const populated = await Project.findById(project._id)
       .populate('owner', 'name email')
       .populate('teamMembers', 'name email')
@@ -1854,7 +2300,7 @@ exports.extendValidationTimeline = async (req, res) => {
       return res.status(403).json({ message: 'Only the venture owner can extend the timeline' })
     }
 
-    if (project.status !== 'validation_failed') {
+    if (!isValidationOutcomeFailed(project) && getProjectLifecycle(project) !== 'pivoted') {
       return res.status(400).json({ message: 'Timeline extension is available only after a failed validation' })
     }
 
@@ -1862,7 +2308,14 @@ exports.extendValidationTimeline = async (req, res) => {
       project.buildPhase = {}
     }
 
-    project.status = 'building'
+    setProjectLifecycle(project, 'prototype')
+    project.momentumStatus = 'facing_blockers'
+    project.teamCheckIn = {
+      status: 'facing_blockers',
+      note: 'Timeline extended for focused rework.',
+      updatedAt: new Date(),
+      updatedBy: requesterId
+    }
     project.buildPhase.startDate = new Date()
     project.buildPhase.endDate = new Date(Date.now() + extensionDays * 24 * 60 * 60 * 1000)
     project.buildPhase.isActive = true
@@ -1906,6 +2359,13 @@ exports.extendValidationTimeline = async (req, res) => {
     project.validation.featuredAt = undefined
 
     await project.save()
+
+    await logContribution({
+      projectId: project._id,
+      contributor: requesterId,
+      action: 'Extended venture timeline',
+      impact: `Granted ${extensionDays}-day rework extension.`
+    })
 
     await createNotification(
       project.owner,
@@ -1975,5 +2435,454 @@ exports.markReviewHelpful = async (req, res) => {
   } catch (error) {
     console.error('Mark helpful error:', error)
     res.status(500).json({ message: 'Failed to mark feedback helpful' })
+  }
+}
+
+exports.getMilestones = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const project = await Project.findById(id).select('owner teamMembers')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+
+    const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can access milestones' })
+    }
+
+    const milestones = await Milestone.find({ projectId: id })
+      .populate('owner', 'name email')
+      .populate('createdBy', 'name email')
+      .populate('dependencies', 'title status lifecycleStage')
+      .sort({ dueDate: 1, createdAt: -1 })
+
+    return res.json({ milestones })
+  } catch (error) {
+    console.error('Get milestones error:', error)
+    return res.status(500).json({ message: 'Failed to fetch milestones' })
+  }
+}
+
+exports.createMilestone = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const { title, description, owner, lifecycleStage, dueDate, dependencies, blockers, blockerDetails, status, priority } = req.body
+
+    const project = await Project.findById(id).select('owner teamMembers readinessScore lifecycleStage momentumStatus')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+
+    const requesterIdString = requesterId?.toString()
+    const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can create milestones' })
+    }
+
+    const milestone = await Milestone.create({
+      projectId: id,
+      title: String(title || '').trim(),
+      description: typeof description === 'string' ? description.trim() : '',
+      owner: owner || undefined,
+      lifecycleStage: normalizeLifecycleStage(lifecycleStage || project.lifecycleStage),
+      dueDate: dueDate ? new Date(dueDate) : undefined,
+      dependencies: normalizeDependencyIds(dependencies),
+      blockers: normalizeBlockers(blockers),
+      blockerDetails: normalizeBlockerDetails(blockerDetails, requesterId),
+      status: ['pending', 'in_progress', 'completed', 'blocked'].includes(status) ? status : 'pending',
+      priority: ['low', 'medium', 'high'].includes(priority) ? priority : 'medium',
+      createdBy: requesterId
+    })
+
+    project.readinessScore = toReadinessScore((project.readinessScore || 0) + 2, project.readinessScore)
+    setProjectLifecycle(project, getProjectLifecycle(project))
+    project.momentumStatus = milestone.status === 'blocked' ? 'facing_blockers' : project.momentumStatus
+    await project.save()
+
+    await logContribution({
+      projectId: id,
+      contributor: requesterId,
+      action: 'Created milestone',
+      impact: milestone.title
+    })
+
+    const populated = await milestone.populate([
+      { path: 'owner', select: 'name email' },
+      { path: 'createdBy', select: 'name email' },
+      { path: 'dependencies', select: 'title status lifecycleStage' }
+    ])
+    return res.status(201).json({ message: 'Milestone created', milestone: populated })
+  } catch (error) {
+    console.error('Create milestone error:', error)
+    return res.status(500).json({ message: 'Failed to create milestone' })
+  }
+}
+
+exports.updateMilestone = async (req, res) => {
+  try {
+    const { id, milestoneId } = req.params
+    const requesterId = req.user?.userId
+    const { title, description, owner, lifecycleStage, dueDate, dependencies, blockers, blockerDetails, status, priority } = req.body
+
+    const project = await Project.findById(id).select('owner teamMembers readinessScore momentumStatus lifecycleStage')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+
+    const requesterIdString = requesterId?.toString()
+    const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can update milestones' })
+    }
+
+    const milestone = await Milestone.findOne({ _id: milestoneId, projectId: id })
+    if (!milestone) {
+      return res.status(404).json({ message: 'Milestone not found' })
+    }
+
+    const wasCompleted = milestone.status === 'completed'
+    if (typeof title === 'string') milestone.title = title.trim()
+    if (typeof description === 'string') milestone.description = description.trim()
+    if (typeof owner !== 'undefined') milestone.owner = owner || undefined
+    if (typeof lifecycleStage === 'string') milestone.lifecycleStage = normalizeLifecycleStage(lifecycleStage, project.lifecycleStage)
+    if (typeof dueDate !== 'undefined') milestone.dueDate = dueDate ? new Date(dueDate) : undefined
+    if (typeof dependencies !== 'undefined') milestone.dependencies = normalizeDependencyIds(dependencies)
+    if (typeof blockers !== 'undefined') milestone.blockers = normalizeBlockers(blockers)
+    if (typeof blockerDetails !== 'undefined') milestone.blockerDetails = normalizeBlockerDetails(blockerDetails, requesterId)
+    if (typeof status === 'string' && ['pending', 'in_progress', 'completed', 'blocked'].includes(status)) {
+      milestone.status = status
+    }
+    if (typeof priority === 'string' && ['low', 'medium', 'high'].includes(priority)) {
+      milestone.priority = priority
+    }
+    if (milestone.status === 'completed') {
+      milestone.completedAt = milestone.completedAt || new Date()
+    } else {
+      milestone.completedAt = undefined
+    }
+
+    await milestone.save()
+
+    const nowCompleted = milestone.status === 'completed'
+    if (nowCompleted && !wasCompleted) {
+      project.readinessScore = toReadinessScore((project.readinessScore || 0) + 4, project.readinessScore)
+      await User.updateOne(
+        { _id: requesterId },
+        { $inc: { 'executionProfile.contributionMetrics.milestonesCompleted': 1 } }
+      )
+    } else if (!nowCompleted && wasCompleted) {
+      project.readinessScore = toReadinessScore((project.readinessScore || 0) - 2, project.readinessScore)
+    }
+
+    if (milestone.status === 'blocked') {
+      project.momentumStatus = 'facing_blockers'
+    } else if (project.momentumStatus === 'facing_blockers') {
+      project.momentumStatus = 'strong_momentum'
+    }
+    await project.save()
+
+    await logContribution({
+      projectId: id,
+      contributor: requesterId,
+      action: 'Updated milestone',
+      impact: `${milestone.title} (${milestone.status})`
+    })
+
+    const populated = await Milestone.findById(milestone._id)
+      .populate('owner', 'name email')
+      .populate('createdBy', 'name email')
+      .populate('dependencies', 'title status lifecycleStage')
+    return res.json({ message: 'Milestone updated', milestone: populated })
+  } catch (error) {
+    console.error('Update milestone error:', error)
+    return res.status(500).json({ message: 'Failed to update milestone' })
+  }
+}
+
+exports.deleteMilestone = async (req, res) => {
+  try {
+    const { id, milestoneId } = req.params
+    const requesterId = req.user?.userId
+    const project = await Project.findById(id).select('owner')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+    if (!requesterId || toId(project.owner) !== requesterId.toString()) {
+      return res.status(403).json({ message: 'Only the venture lead can delete milestones' })
+    }
+
+    const deleted = await Milestone.findOneAndDelete({ _id: milestoneId, projectId: id })
+    if (!deleted) {
+      return res.status(404).json({ message: 'Milestone not found' })
+    }
+
+    await logContribution({
+      projectId: id,
+      contributor: requesterId,
+      action: 'Deleted milestone',
+      impact: deleted.title
+    })
+
+    return res.json({ message: 'Milestone deleted' })
+  } catch (error) {
+    console.error('Delete milestone error:', error)
+    return res.status(500).json({ message: 'Failed to delete milestone' })
+  }
+}
+
+exports.getContributionLogs = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const project = await Project.findById(id).select('owner teamMembers')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+    const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can view execution logs' })
+    }
+
+    const logs = await ContributionLog.find({ projectId: id })
+      .populate('contributor', 'name email')
+      .populate('milestoneId', 'title status lifecycleStage')
+      .sort({ timestamp: -1 })
+      .limit(300)
+
+    return res.json({ logs })
+  } catch (error) {
+    console.error('Get contribution logs error:', error)
+    return res.status(500).json({ message: 'Failed to fetch contribution logs' })
+  }
+}
+
+exports.createContributionLog = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const { action, impact, milestoneId } = req.body
+    const project = await Project.findById(id).select('owner teamMembers readinessScore')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+    const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can post execution logs' })
+    }
+
+    const entry = await logContribution({
+      projectId: id,
+      contributor: requesterId,
+      milestoneId,
+      action,
+      impact
+    })
+
+    project.readinessScore = toReadinessScore((project.readinessScore || 0) + 1, project.readinessScore)
+    await project.save()
+
+    return res.status(201).json({ message: 'Execution log added', log: entry })
+  } catch (error) {
+    console.error('Create contribution log error:', error)
+    return res.status(500).json({ message: 'Failed to add execution log' })
+  }
+}
+
+exports.updateTeamCheckIn = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const { status, note } = req.body
+    const project = await Project.findById(id).select('owner teamMembers momentumStatus teamCheckIn readinessScore')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+    const isTeam = isViewerTeamMember(project, requesterId?.toString()) || toId(project.owner) === requesterId?.toString()
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can update team check-in' })
+    }
+
+    const nextStatus = normalizeMomentumStatus(status)
+    project.momentumStatus = nextStatus
+    project.teamCheckIn = {
+      status: nextStatus,
+      note: typeof note === 'string' ? note.trim().slice(0, 500) : '',
+      updatedAt: new Date(),
+      updatedBy: requesterId
+    }
+
+    if (nextStatus === 'strong_momentum') {
+      project.readinessScore = toReadinessScore((project.readinessScore || 0) + 1, project.readinessScore)
+    } else if (nextStatus === 'facing_blockers' || nextStatus === 'pivoting') {
+      project.readinessScore = toReadinessScore((project.readinessScore || 0) - 1, project.readinessScore)
+    }
+
+    await project.save()
+
+    await logContribution({
+      projectId: id,
+      contributor: requesterId,
+      action: 'Updated team check-in',
+      impact: `${nextStatus}${note ? `: ${String(note).trim().slice(0, 120)}` : ''}`
+    })
+
+    return res.json({ message: 'Team check-in updated', momentumStatus: project.momentumStatus, teamCheckIn: project.teamCheckIn })
+  } catch (error) {
+    console.error('Update team check-in error:', error)
+    return res.status(500).json({ message: 'Failed to update team check-in' })
+  }
+}
+
+exports.getContinuationPlan = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const project = await Project.findById(id)
+      .select('owner teamMembers numberOfTeammates lifecycleStage readinessScore momentumStatus teamCheckIn validation buildPhase')
+      .lean()
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+
+    const requesterIdString = requesterId?.toString()
+    const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can view continuation plan' })
+    }
+
+    const milestones = await Milestone.find({ projectId: id }).lean()
+    return res.json(buildContinuationPlan({ project, milestones }))
+  } catch (error) {
+    console.error('Get continuation plan error:', error)
+    return res.status(500).json({ message: 'Failed to load continuation plan' })
+  }
+}
+
+exports.applyContinuationAction = async (req, res) => {
+  try {
+    const { id } = req.params
+    const requesterId = req.user?.userId
+    const { action, note } = req.body
+    const project = await Project.findById(id).select('owner teamMembers numberOfTeammates lifecycleStage readinessScore momentumStatus teamCheckIn validation buildPhase')
+    if (!project) {
+      return res.status(404).json({ message: 'Venture not found' })
+    }
+
+    const requesterIdString = requesterId?.toString()
+    const isTeam = isViewerTeamMember(project, requesterIdString) || toId(project.owner) === requesterIdString
+    if (!isTeam) {
+      return res.status(403).json({ message: 'Only venture contributors can continue this venture' })
+    }
+
+    if (!project.validation) project.validation = {}
+    const currentStage = getProjectLifecycle(project)
+    const cleanedNote = normalizeLongText(note || '', 800)
+    let nextStage = currentStage
+    let momentumStatus = project.momentumStatus || 'need_contributors'
+    let readinessDelta = 1
+    let activity = 'Continued venture execution'
+
+    if (action === 'continue_building') {
+      nextStage = getNextLifecycleStage(currentStage) || currentStage
+      momentumStatus = 'strong_momentum'
+      readinessDelta = 3
+      activity = 'Chose continuation path: Continue Building'
+    } else if (action === 'prepare_incubation') {
+      nextStage = Number(project.readinessScore || 0) >= 70 || project.validation?.validationStatus === 'passed'
+        ? 'incubation_ready'
+        : 'growth'
+      momentumStatus = 'preparing_launch'
+      readinessDelta = 8
+      activity = 'Chose continuation path: Prepare For Incubation'
+    } else if (action === 'recruit_contributors') {
+      nextStage = 'team_formation'
+      momentumStatus = 'need_contributors'
+      readinessDelta = 1
+      activity = 'Chose continuation path: Recruit Contributors'
+    } else if (action === 'pivot_venture') {
+      nextStage = 'pivoted'
+      momentumStatus = 'pivoting'
+      readinessDelta = -4
+      project.validation.validationStatus = project.validation?.validationStatus === 'in_review'
+        ? 'pending'
+        : project.validation?.validationStatus || 'pending'
+      activity = 'Chose continuation path: Pivot Venture'
+    } else if (action === 'relaunch_validation') {
+      nextStage = 'validation'
+      momentumStatus = 'strong_momentum'
+      readinessDelta = 2
+      project.validation.validationStatus = 'pending'
+      activity = 'Chose continuation path: Relaunch Validation'
+    } else if (action === 'extend_mvp') {
+      nextStage = 'mvp'
+      momentumStatus = 'strong_momentum'
+      readinessDelta = 4
+      project.buildPhase = {
+        ...(project.buildPhase || {}),
+        isActive: true,
+        lastActivity: new Date(),
+        totalDurationDays: Math.max(14, Number(project.buildPhase?.totalDurationDays || 14) + 7),
+        isExtendedTimeline: true,
+        extensionCount: Number(project.buildPhase?.extensionCount || 0) + 1,
+        extensionDaysGranted: Number(project.buildPhase?.extensionDaysGranted || 0) + 7
+      }
+      activity = 'Chose continuation path: Extend MVP'
+    } else if (action === 'launch_beta') {
+      nextStage = 'growth'
+      momentumStatus = 'preparing_launch'
+      readinessDelta = 6
+      activity = 'Chose continuation path: Launch Beta'
+    } else if (action === 'archive_venture') {
+      nextStage = 'archived'
+      momentumStatus = 'pivoting'
+      readinessDelta = 0
+      activity = 'Chose continuation path: Archive Venture'
+    } else {
+      return res.status(400).json({ message: 'Unknown continuation action' })
+    }
+
+    if (currentStage !== nextStage && !canTransitionLifecycle(currentStage, nextStage)) {
+      const relaxedContinuationTargets = new Set(['team_formation', 'validation', 'mvp', 'growth', 'pivoted', 'archived'])
+      if (!relaxedContinuationTargets.has(nextStage)) {
+        return res.status(400).json({ message: `Cannot move from ${getLifecycleLabel(currentStage)} to ${getLifecycleLabel(nextStage)}` })
+      }
+    }
+
+    setProjectLifecycle(project, nextStage)
+    project.momentumStatus = momentumStatus
+    project.readinessScore = toReadinessScore(Number(project.readinessScore || 0) + readinessDelta, project.readinessScore)
+    project.teamCheckIn = {
+      status: momentumStatus,
+      note: cleanedNote || activity,
+      updatedAt: new Date(),
+      updatedBy: requesterId
+    }
+
+    await project.save()
+
+    await logContribution({
+      projectId: id,
+      contributor: requesterId,
+      action: activity,
+      impact: cleanedNote || `Lifecycle now ${getLifecycleLabel(project.lifecycleStage)}`
+    })
+
+    const milestones = await Milestone.find({ projectId: id }).lean()
+    return res.json({
+      message: 'Continuation path applied',
+      project: {
+        lifecycleStage: project.lifecycleStage,
+        readinessScore: project.readinessScore,
+        momentumStatus: project.momentumStatus,
+        teamCheckIn: project.teamCheckIn
+      },
+      continuation: buildContinuationPlan({ project: project.toObject(), milestones })
+    })
+  } catch (error) {
+    console.error('Apply continuation action error:', error)
+    return res.status(500).json({ message: 'Failed to apply continuation path' })
   }
 }

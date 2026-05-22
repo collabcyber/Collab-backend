@@ -79,10 +79,79 @@ const buildVerifyLink = (email) => {
 
 const getGoogleClientId = () => process.env.GOOGLE_CLIENT_ID?.trim()
 
+const normalizeLabel = (value) => {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
+}
+
+const normalizeStringList = (input) => {
+  const list = Array.isArray(input) ? input : input ? [input] : []
+  const normalized = list
+    .map((item) => normalizeLabel(typeof item === 'string' ? item : String(item)))
+    .filter(Boolean)
+  return [...new Set(normalized)]
+}
+
+const normalizeExecutionProfileInput = ({
+  userGoal,
+  executionRoles,
+  industryInterests,
+  commitmentLevel
+} = {}) => {
+  const validCommitmentLevels = new Set([
+    'Exploring',
+    'Casual Contributor',
+    'Serious Builder',
+    'Startup Founder'
+  ])
+
+  const normalizedGoal = typeof userGoal === 'string' ? userGoal.trim() : ''
+  const goals = normalizedGoal ? [normalizedGoal.slice(0, 180)] : []
+  const roles = normalizeStringList(executionRoles).slice(0, 10)
+  const interests = normalizeStringList(industryInterests).slice(0, 15)
+  const nextCommitment = validCommitmentLevels.has(commitmentLevel) ? commitmentLevel : 'Exploring'
+
+  return {
+    goals,
+    roles,
+    commitmentLevel: nextCommitment,
+    industryInterests: interests,
+    contributionMetrics: {
+      milestonesCompleted: 0,
+      contributionConsistency: 0,
+      collaborationQuality: 0,
+      executionReliability: 0
+    },
+    startupParticipationTimeline: []
+  }
+}
+
+const normalizeExecutionProfile = (profile = {}) => ({
+  goals: Array.isArray(profile.goals) ? profile.goals.filter(Boolean) : [],
+  roles: Array.isArray(profile.roles) ? profile.roles.filter(Boolean) : [],
+  commitmentLevel: profile.commitmentLevel || 'Exploring',
+  industryInterests: Array.isArray(profile.industryInterests) ? profile.industryInterests.filter(Boolean) : [],
+  contributionMetrics: {
+    milestonesCompleted: Number(profile?.contributionMetrics?.milestonesCompleted || 0),
+    contributionConsistency: Number(profile?.contributionMetrics?.contributionConsistency || 0),
+    collaborationQuality: Number(profile?.contributionMetrics?.collaborationQuality || 0),
+    executionReliability: Number(profile?.contributionMetrics?.executionReliability || 0)
+  },
+  startupParticipationTimeline: Array.isArray(profile.startupParticipationTimeline)
+    ? profile.startupParticipationTimeline
+    : []
+})
+
 const toUserPayload = (user) => ({
   id: user._id,
   name: user.name,
   email: user.email,
+  sprintStatus: user.sprintStatus || 'none',
   college: user.college ? { id: user.college._id, name: user.college.name, type: user.college.type } : null,
   college_id: user.college_id || user.college?._id,
   course: user.course,
@@ -91,7 +160,8 @@ const toUserPayload = (user) => ({
   primaryCategory: user.primaryCategory,
   points: user.points,
   badges: user.badges,
-  role: user.role
+  role: user.role,
+  executionProfile: normalizeExecutionProfile(user.executionProfile)
 })
 
 exports.register = async (req, res) => {
@@ -110,7 +180,11 @@ exports.register = async (req, res) => {
       yearOfStudy, 
       skills, 
       primaryCategory,
-      phone
+      phone,
+      userGoal,
+      executionRoles,
+      industryInterests,
+      commitmentLevel
     } = req.body
 
     if (!name || !email || !password) {
@@ -225,6 +299,12 @@ exports.register = async (req, res) => {
       skills: normalizedSkills,
       primaryCategory: primaryCategory || '',
       phone: phone ? phone.toString().trim() : '',
+      executionProfile: normalizeExecutionProfileInput({
+        userGoal,
+        executionRoles,
+        industryInterests,
+        commitmentLevel
+      }),
       emailVerified: false,
       emailVerificationOTP: undefined,
       emailVerificationOTPHash: hashOtp(otp),
@@ -334,20 +414,7 @@ exports.verifyEmail = async (req, res) => {
     setAuthCookie(res, token)
 
     res.json({
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        college: user.college ? { id: user.college._id, name: user.college.name, type: user.college.type } : null,
-        college_id: user.college_id || user.college?._id,
-        course: user.course,
-        yearOfStudy: user.yearOfStudy,
-        skills: user.skills,
-        primaryCategory: user.primaryCategory,
-        points: user.points,
-        badges: user.badges,
-        role: user.role
-      },
+      user: toUserPayload(user),
       message: 'Email verified successfully'
     })
   } catch (error) {
@@ -539,20 +606,7 @@ exports.adminTwoFactorVerifyLogin = async (req, res) => {
 
     res.json({
       message: 'Two-factor authentication successful',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        college: user.college ? { id: user.college._id, name: user.college.name, type: user.college.type } : null,
-        college_id: user.college_id || user.college?._id,
-        course: user.course,
-        yearOfStudy: user.yearOfStudy,
-        skills: user.skills,
-        primaryCategory: user.primaryCategory,
-        points: user.points,
-        badges: user.badges,
-        role: user.role
-      }
+      user: toUserPayload(user)
     })
   } catch (error) {
     console.error('adminTwoFactorVerifyLogin error:', error)

@@ -16,7 +16,7 @@ const CheckpointSchema = new mongoose.Schema({
   },
   submissionLink: {
     type: String,
-    required: true,
+    default: '',
     trim: true
   },
   description: {
@@ -24,6 +24,54 @@ const CheckpointSchema = new mongoose.Schema({
     default: '',
     trim: true,
     maxlength: 2000
+  },
+  executionEntry: {
+    progressNarrative: {
+      type: String,
+      default: '',
+      trim: true,
+      maxlength: 2500
+    },
+    nextMilestone: {
+      type: String,
+      default: '',
+      trim: true,
+      maxlength: 300
+    },
+    blockers: [{
+      type: String,
+      trim: true,
+      maxlength: 240
+    }],
+    evidenceLinks: [{
+      type: String,
+      trim: true,
+      maxlength: 1000
+    }],
+    reflections: [{
+      questionKey: {
+        type: String,
+        required: true,
+        trim: true,
+        maxlength: 120
+      },
+      question: {
+        type: String,
+        required: true,
+        trim: true,
+        maxlength: 240
+      },
+      answer: {
+        type: String,
+        required: true,
+        trim: true,
+        maxlength: 2000
+      }
+    }]
+  },
+  submittedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   },
   submittedAt: {
     type: Date,

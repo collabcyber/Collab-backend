@@ -65,7 +65,7 @@ const generateCertificatePdf = async ({ userName, projectTitle, collegeName, iss
 
     centerText('This certifies that', certY, 14)
     centerText(userName, nameY, nameSize, 'Times-Italic')
-    centerText('is actively working on the project', workY, 13)
+    centerText('is actively working on the venture', workY, 13)
     centerText(`"${projectTitle}"`, pageHeight * 0.60, 16, 'Times-Italic')
     centerText(`which has entered the Validation phase on ${formatDate(issuedAt)}.`, pageHeight * 0.64, 12)
 
@@ -97,9 +97,9 @@ const generateValidationCertificates = async ({ project, members }) => {
   for (const member of members) {
     const certificateId = crypto.randomUUID()
     const userId = member._id || member.id || member
-    const userName = member.name || 'Team Member'
+    const userName = member.name || 'Team Contributor'
     const result = await generateCertificatePdf({
-      userName: member.name || 'Team Member',
+      userName: member.name || 'Team Contributor',
       projectTitle: project.title,
       collegeName: project.college?.name,
       issuedAt,

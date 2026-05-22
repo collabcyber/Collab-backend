@@ -7,6 +7,7 @@ const { z } = require('zod')
 const {
   createProject,
   getProjects,
+  getDiscoveryProjects,
   getProjectById,
   joinProject,
   respondToJoinRequest,
@@ -29,12 +30,29 @@ const {
   updateProjectDetails,
   updateValidationWorkspace,
   removeFromValidation,
-  extendValidationTimeline
+  extendValidationTimeline,
+  getMilestones,
+  createMilestone,
+  updateMilestone,
+  deleteMilestone,
+  getContributionLogs,
+  createContributionLog,
+  updateTeamCheckIn,
+  getContinuationPlan,
+  applyContinuationAction
 } = require('../controllers/projectController')
 const validate = require('../middleware/validate')
 const { requireProjectOwner, requireTeamMember } = require('../middleware/projectAuth')
-const { checkSprintActive } = require('../middleware/checkSprintActive')
-const { project, objectId, projectsQuery, paginationQuery, emptyBody } = require('../validators')
+const {
+  project,
+  objectId,
+  projectsQuery,
+  paginationQuery,
+  emptyBody,
+  milestone,
+  contribution,
+  checkIn
+} = require('../validators')
 
 const uploadsDir = path.join(__dirname, '..', 'uploads')
 if (!fs.existsSync(uploadsDir)) {
@@ -52,8 +70,9 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 25 * 1024 * 1024 } })
 
 // Basic CRUD
-router.post('/', checkSprintActive, validate(project.createProjectBody), createProject)
+router.post('/', validate(project.createProjectBody), createProject)
 router.get('/', validate(z.object({ query: projectsQuery })), getProjects)
+router.get('/discovery', validate(z.object({ query: projectsQuery.passthrough() })), getDiscoveryProjects)
 router.get('/options', validate(emptyBody), getProjectOptions)
 router.get('/validation', validate(z.object({ query: paginationQuery.passthrough() })), getValidationProjects)
 router.get('/:id', validate(z.object({ params: z.object({ id: objectId }) })), getProjectById)
@@ -67,6 +86,9 @@ router.post('/:id/validation/extend', validate(z.object({ params: z.object({ id:
 router.post('/:id/start-build', validate(z.object({ params: z.object({ id: objectId }) })), requireProjectOwner, startBuildPhase)
 router.post('/:id/complete', validate(z.object({ params: z.object({ id: objectId }) })), requireProjectOwner, completeProject)
 router.post('/:id/update-activity', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, updateActivity)
+router.patch('/:id/team-checkin', validate(z.object({ params: z.object({ id: objectId }), body: checkIn.checkInBody })), requireTeamMember, updateTeamCheckIn)
+router.get('/:id/continuation', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, getContinuationPlan)
+router.post('/:id/continuation', validate(z.object({ params: z.object({ id: objectId }), body: checkIn.continuationBody })), requireTeamMember, applyContinuationAction)
 
 // Team Management
 router.post('/:id/join', validate(z.object({ params: z.object({ id: objectId }), body: project.joinRequestBody })), joinProject)
@@ -88,5 +110,13 @@ router.delete('/:id/files/:fileId', validate(z.object({ params: z.object({ id: o
 // Validation feedback
 router.post('/:id/review', validate(z.object({ params: z.object({ id: objectId }), body: project.validationSubmitBody })), submitReview)
 router.put('/:id/reviews/:reviewId/helpful', validate(z.object({ params: z.object({ id: objectId, reviewId: objectId }) })), requireProjectOwner, markReviewHelpful)
+
+// Milestones & execution logs
+router.get('/:id/milestones', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, getMilestones)
+router.post('/:id/milestones', validate(z.object({ params: z.object({ id: objectId }), body: milestone.milestoneCreateBody })), requireTeamMember, createMilestone)
+router.patch('/:id/milestones/:milestoneId', validate(z.object({ params: milestone.milestoneParams, body: milestone.milestoneUpdateBody })), requireTeamMember, updateMilestone)
+router.delete('/:id/milestones/:milestoneId', validate(z.object({ params: milestone.milestoneParams })), requireProjectOwner, deleteMilestone)
+router.get('/:id/contribution-logs', validate(z.object({ params: z.object({ id: objectId }) })), requireTeamMember, getContributionLogs)
+router.post('/:id/contribution-logs', validate(z.object({ params: z.object({ id: objectId }), body: contribution.contributionCreateBody })), requireTeamMember, createContributionLog)
 
 module.exports = router

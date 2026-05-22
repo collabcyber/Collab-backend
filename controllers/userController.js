@@ -1,6 +1,49 @@
 const User = require('../models/User')
 const College = require('../models/College')
+const Project = require('../models/Project')
+const Milestone = require('../models/Milestone')
+const ContributionLog = require('../models/ContributionLog')
 const bcrypt = require('bcryptjs')
+const { normalizeLifecycleFilter } = require('../utils/ventureLifecycle')
+
+const normalizeLabel = (value) => {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  return trimmed
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
+}
+
+const normalizeStringList = (value) => {
+  const list = Array.isArray(value) ? value : value ? [value] : []
+  const normalized = list
+    .map((item) => normalizeLabel(typeof item === 'string' ? item : String(item)))
+    .filter(Boolean)
+  return [...new Set(normalized)]
+}
+
+const normalizeCommitment = (value) => {
+  const valid = new Set(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder'])
+  return valid.has(value) ? value : 'Exploring'
+}
+
+const toExecutionProfile = (profile = {}) => ({
+  goals: Array.isArray(profile.goals) ? profile.goals : [],
+  roles: Array.isArray(profile.roles) ? profile.roles : [],
+  commitmentLevel: profile.commitmentLevel || 'Exploring',
+  industryInterests: Array.isArray(profile.industryInterests) ? profile.industryInterests : [],
+  contributionMetrics: {
+    milestonesCompleted: Number(profile?.contributionMetrics?.milestonesCompleted || 0),
+    contributionConsistency: Number(profile?.contributionMetrics?.contributionConsistency || 0),
+    collaborationQuality: Number(profile?.contributionMetrics?.collaborationQuality || 0),
+    executionReliability: Number(profile?.contributionMetrics?.executionReliability || 0)
+  },
+  startupParticipationTimeline: Array.isArray(profile.startupParticipationTimeline)
+    ? profile.startupParticipationTimeline
+    : []
+})
 
 const emailIsValid = (email) => {
   const re = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
@@ -49,18 +92,31 @@ exports.getProfile = async (req, res) => {
       showContactToTeam: user.showContactToTeam,
       twoFactorEnabled: user.twoFactorEnabled,
       twoFactorPending: user.twoFactorPending,
-      role: user.role
+      role: user.role,
+      executionProfile: toExecutionProfile(user.executionProfile)
     })
   } catch (error) {
-    console.error('Get profile error:', error)
-    res.status(500).json({ message: 'Failed to fetch profile' })
+    console.error('Get execution profile error:', error)
+    res.status(500).json({ message: 'Failed to fetch execution profile' })
   }
 }
 
 exports.updateProfile = async (req, res) => {
   try {
     const userId = req.user.userId
-    const { name, course, yearOfStudy, skills, primaryCategory, showContactToTeam, phone } = req.body
+    const {
+      name,
+      course,
+      yearOfStudy,
+      skills,
+      primaryCategory,
+      showContactToTeam,
+      phone,
+      userGoal,
+      executionRoles,
+      industryInterests,
+      commitmentLevel
+    } = req.body
 
     const user = await User.findById(userId).select('+password')
     if (!user) {
@@ -74,13 +130,28 @@ exports.updateProfile = async (req, res) => {
     if (primaryCategory) user.primaryCategory = primaryCategory
     if (showContactToTeam !== undefined) user.showContactToTeam = showContactToTeam
     if (phone !== undefined) user.phone = phone ? phone.toString().trim() : ''
+    if (!user.executionProfile) user.executionProfile = {}
+
+    if (userGoal !== undefined) {
+      const goal = typeof userGoal === 'string' ? userGoal.trim().slice(0, 180) : ''
+      user.executionProfile.goals = goal ? [goal] : []
+    }
+    if (executionRoles !== undefined) {
+      user.executionProfile.roles = normalizeStringList(executionRoles).slice(0, 10)
+    }
+    if (industryInterests !== undefined) {
+      user.executionProfile.industryInterests = normalizeStringList(industryInterests).slice(0, 15)
+    }
+    if (commitmentLevel !== undefined) {
+      user.executionProfile.commitmentLevel = normalizeCommitment(commitmentLevel)
+    }
 
     await user.save()
 
-    res.json({ message: 'Profile updated successfully' })
+    res.json({ message: 'Execution Profile updated successfully' })
   } catch (error) {
-    console.error('Update profile error:', error)
-    res.status(500).json({ message: 'Failed to update profile' })
+    console.error('Update execution profile error:', error)
+    res.status(500).json({ message: 'Failed to update execution profile' })
   }
 }
 
@@ -188,17 +259,124 @@ exports.getRank = async (req, res) => {
   }
 }
 
+exports.getExecutionProfile = async (req, res) => {
+  try {
+    const userId = req.user.userId
+    const user = await User.findById(userId)
+      .populate('college', 'name type')
+      .lean()
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    const projects = await Project.find({ $or: [{ owner: userId }, { teamMembers: userId }] })
+      .select('title shortPitch lifecycleStage readinessScore momentumStatus owner teamMembers rolesNeeded updatedAt createdAt validation')
+      .sort({ updatedAt: -1 })
+      .lean()
+    const projectIds = projects.map((project) => project._id)
+
+    const [milestones, logs] = await Promise.all([
+      Milestone.find({ projectId: { $in: projectIds } })
+        .populate('projectId', 'title lifecycleStage')
+        .populate('owner', 'name email')
+        .lean(),
+      ContributionLog.find({ contributor: userId })
+        .populate('projectId', 'title lifecycleStage')
+        .sort({ timestamp: -1 })
+        .limit(100)
+        .lean()
+    ])
+
+    const ownedMilestones = milestones.filter((milestone) => String(milestone.owner?._id || milestone.owner || '') === String(userId))
+    const completedMilestones = ownedMilestones.filter((milestone) => milestone.status === 'completed')
+    const resolvedBlockers = milestones.reduce((total, milestone) => {
+      const resolved = (milestone.blockerDetails || []).filter((blocker) =>
+        blocker.status === 'resolved' && String(blocker.createdBy || '') === String(userId)
+      ).length
+      return total + resolved
+    }, 0)
+
+    const activeDays = new Set(
+      logs
+        .filter((log) => log.timestamp)
+        .map((log) => new Date(log.timestamp).toISOString().slice(0, 10))
+    ).size
+    const consistency = Math.min(100, Math.round((activeDays / 30) * 100))
+    const reliability = ownedMilestones.length
+      ? Math.round((completedMilestones.length / ownedMilestones.length) * 100)
+      : Math.min(100, logs.length * 5)
+    const progressionImpact = projects.reduce((sum, project) => sum + Number(project.readinessScore || 0), 0)
+    const avgReadinessImpact = projects.length ? Math.round(progressionImpact / projects.length) : 0
+    const collaborationQuality = Math.min(100, Math.round((Number(user.helpfulFeedback || 0) * 12) + (logs.length * 2)))
+    const executionCredibility = Math.min(100, Math.round(
+      (completedMilestones.length * 10)
+      + (projects.length * 6)
+      + (resolvedBlockers * 8)
+      + (consistency * 0.25)
+      + (avgReadinessImpact * 0.25)
+    ))
+
+    const stageCounts = projects.reduce((acc, project) => {
+      const stage = project.lifecycleStage || 'idea'
+      acc[stage] = (acc[stage] || 0) + 1
+      return acc
+    }, {})
+
+    const activeVentures = projects.filter((project) => !['archived', 'incubation_ready'].includes(project.lifecycleStage))
+    const strengths = [
+      completedMilestones.length > 0 ? 'Milestone execution' : '',
+      resolvedBlockers > 0 ? 'Blocker resolution' : '',
+      logs.length >= 5 ? 'Contribution consistency' : '',
+      projects.some((project) => ['mvp', 'growth', 'incubation_ready'].includes(project.lifecycleStage)) ? 'Startup progression' : '',
+      user.validationsGiven > 0 ? 'Validation feedback' : ''
+    ].filter(Boolean)
+
+    res.json({
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        college: user.college,
+        skills: user.skills || [],
+        primaryCategory: user.primaryCategory || '',
+        executionProfile: toExecutionProfile(user.executionProfile || {})
+      },
+      reputation: {
+        executionCredibility,
+        milestonesCompleted: completedMilestones.length,
+        milestonesOwned: ownedMilestones.length,
+        venturesContributedTo: projects.length,
+        activeVentures: activeVentures.length,
+        blockerResolutions: resolvedBlockers,
+        contributionConsistency: consistency,
+        executionReliability: reliability,
+        collaborationQuality,
+        ventureProgressionImpact: avgReadinessImpact,
+        strengths
+      },
+      stageCounts,
+      activeVentures,
+      recentContributions: logs.slice(0, 12),
+      completedMilestones: completedMilestones.slice(0, 12)
+    })
+  } catch (error) {
+    console.error('Get execution profile error:', error)
+    res.status(500).json({ message: 'Failed to load execution profile' })
+  }
+}
+
 exports.getUserProjects = async (req, res) => {
   try {
     const userId = req.user.userId
-    const { status = 'all', page = 1, limit = 10 } = req.query
+    const { status = 'all', lifecycleStage, page = 1, limit = 10 } = req.query
     const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 10))
     const parsedPage = Math.max(1, parseInt(page, 10) || 1)
 
     let query = { $or: [{ owner: userId }, { teamMembers: userId }] }
     
-    if (status !== 'all') {
-      query.status = status
+    const lifecycleFilter = lifecycleStage || status
+    if (lifecycleFilter !== 'all') {
+      query.lifecycleStage = normalizeLifecycleFilter(lifecycleFilter)
     }
 
     const Project = require('../models/Project')
@@ -221,8 +399,8 @@ exports.getUserProjects = async (req, res) => {
       }
     })
   } catch (error) {
-    console.error('Get user projects error:', error)
-    res.status(500).json({ message: 'Failed to fetch user projects' })
+    console.error('Get user ventures error:', error)
+    res.status(500).json({ message: 'Failed to fetch user ventures' })
   }
 }
 
@@ -297,7 +475,11 @@ exports.createUserByAdmin = async (req, res) => {
       skills,
       primaryCategory,
       phone,
-      showContactToTeam
+      showContactToTeam,
+      userGoal,
+      executionRoles,
+      industryInterests,
+      commitmentLevel
     } = req.body
 
     if (!name || !email || !password) {
@@ -331,7 +513,20 @@ exports.createUserByAdmin = async (req, res) => {
       skills: Array.isArray(skills) ? skills : skills ? [skills] : [],
       primaryCategory: primaryCategory || '',
       phone: phone ? phone.toString().trim() : '',
-      showContactToTeam: Boolean(showContactToTeam)
+      showContactToTeam: Boolean(showContactToTeam),
+      executionProfile: {
+        goals: userGoal ? [String(userGoal).trim().slice(0, 180)] : [],
+        roles: normalizeStringList(executionRoles).slice(0, 10),
+        commitmentLevel: normalizeCommitment(commitmentLevel),
+        industryInterests: normalizeStringList(industryInterests).slice(0, 15),
+        contributionMetrics: {
+          milestonesCompleted: 0,
+          contributionConsistency: 0,
+          collaborationQuality: 0,
+          executionReliability: 0
+        },
+        startupParticipationTimeline: []
+      }
     })
 
     res.status(201).json({
@@ -370,7 +565,11 @@ exports.updateUserByAdmin = async (req, res) => {
       skills,
       primaryCategory,
       phone,
-      showContactToTeam
+      showContactToTeam,
+      userGoal,
+      executionRoles,
+      industryInterests,
+      commitmentLevel
     } = req.body
 
     if (name !== undefined) user.name = name.toString().trim()
@@ -383,6 +582,20 @@ exports.updateUserByAdmin = async (req, res) => {
     if (primaryCategory !== undefined) user.primaryCategory = primaryCategory || ''
     if (phone !== undefined) user.phone = phone ? phone.toString().trim() : ''
     if (showContactToTeam !== undefined) user.showContactToTeam = Boolean(showContactToTeam)
+    if (!user.executionProfile) user.executionProfile = {}
+    if (userGoal !== undefined) {
+      const goal = String(userGoal || '').trim().slice(0, 180)
+      user.executionProfile.goals = goal ? [goal] : []
+    }
+    if (executionRoles !== undefined) {
+      user.executionProfile.roles = normalizeStringList(executionRoles).slice(0, 10)
+    }
+    if (industryInterests !== undefined) {
+      user.executionProfile.industryInterests = normalizeStringList(industryInterests).slice(0, 15)
+    }
+    if (commitmentLevel !== undefined) {
+      user.executionProfile.commitmentLevel = normalizeCommitment(commitmentLevel)
+    }
 
     await user.save()
 
@@ -417,7 +630,7 @@ exports.deleteUserByAdmin = async (req, res) => {
     const ownedCount = await Project.countDocuments({ owner: user._id })
     if (ownedCount > 0) {
       return res.status(400).json({
-        message: 'User owns projects. Transfer ownership or delete those projects first.'
+        message: 'User owns ventures. Transfer ownership or delete those ventures first.'
       })
     }
 
@@ -533,7 +746,7 @@ exports.getAdminStats = async (req, res) => {
 
     const [totalUsers, activeProjects, newSignups, validationAgg] = await Promise.all([
       User.countDocuments({}),
-      Project.countDocuments({ status: { $ne: 'archived' } }),
+      Project.countDocuments({ lifecycleStage: { $ne: 'archived' } }),
       User.countDocuments({ createdAt: { $gte: signupSince } }),
       Project.aggregate([
         {

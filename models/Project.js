@@ -1,4 +1,5 @@
 const mongoose = require('mongoose')
+const { VENTURE_LIFECYCLE, inferLifecycleStage } = require('../utils/ventureLifecycle')
 
 const ProjectSchema = new mongoose.Schema({
   // Universal Fields
@@ -61,17 +62,31 @@ const ProjectSchema = new mongoose.Schema({
     fingerprintedAt: { type: Date }
   },
   
-  // Project Status & Team
-  status: { 
-    type: String, 
-    required: true,
-    enum: ['planning', 'building', 'completed', 'validation', 'validated', 'validation_failed', 'archived'],
-    default: 'planning'
-  },
-  phase: {
+  // Venture Lifecycle
+  lifecycleStage: {
     type: String,
-    enum: ['problem', 'plan', 'build', 'mvp', 'validation', 'demo'],
-    default: 'problem'
+    enum: VENTURE_LIFECYCLE,
+    default: 'idea'
+  },
+  readinessScore: {
+    type: Number,
+    min: 0,
+    max: 100,
+    default: 0
+  },
+  momentumStatus: {
+    type: String,
+    enum: ['strong_momentum', 'facing_blockers', 'need_contributors', 'pivoting', 'preparing_launch'],
+    default: 'need_contributors'
+  },
+  teamCheckIn: {
+    status: {
+      type: String,
+      enum: ['strong_momentum', 'facing_blockers', 'need_contributors', 'pivoting', 'preparing_launch']
+    },
+    note: { type: String, default: '' },
+    updatedAt: { type: Date },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
   },
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   interestedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
@@ -83,9 +98,9 @@ const ProjectSchema = new mongoose.Schema({
   
   // Build Phase
   buildPhase: {
-    startDate: { type: Date, default: Date.now },
+    startDate: { type: Date },
     endDate: { type: Date },
-    isActive: { type: Boolean, default: true },
+    isActive: { type: Boolean, default: false },
     lastActivity: { type: Date, default: Date.now },
     lastPenaltyAt: { type: Date },
     totalDurationDays: { type: Number, default: 14 },
@@ -195,7 +210,7 @@ const ProjectSchema = new mongoose.Schema({
     }],
     validationStatus: { 
       type: String, 
-      enum: ['pending', 'passed', 'failed'],
+      enum: ['pending', 'in_review', 'passed', 'failed'],
       default: 'pending'
     },
     certificates: [{
@@ -229,8 +244,13 @@ const ProjectSchema = new mongoose.Schema({
   }]
 }, { timestamps: true })
 
+ProjectSchema.pre('validate', function(next) {
+  this.lifecycleStage = inferLifecycleStage(this)
+  next()
+})
+
 // Indexes for performance
-ProjectSchema.index({ category: 1, status: 1 })
+ProjectSchema.index({ category: 1, lifecycleStage: 1 })
 ProjectSchema.index({ owner: 1, createdAt: -1 })
 ProjectSchema.index({ 'validation.validationStatus': 1, 'validation.averageRating': -1 })
 ProjectSchema.index({ visibility: 1, college: 1 })

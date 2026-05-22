@@ -7,6 +7,7 @@ const {
   changePassword,
   getLeaderboard,
   getRank,
+  getExecutionProfile,
   getUserProjects,
   getAllUsers,
   getUserActivity,
@@ -25,6 +26,7 @@ router.put('/me', validate(user.updateProfileBody), updateProfile)
 router.put('/change-password', validate(user.changePasswordBody), changePassword)
 router.get('/leaderboard', validate(z.object({ query: leaderboardQuery })), getLeaderboard)
 router.get('/rank', validate(emptyBody), getRank)
+router.get('/execution-profile', validate(emptyBody), getExecutionProfile)
 router.get('/projects', validate(z.object({ query: userProjectsQuery })), getUserProjects)
 router.get('/all', requireRole('admin'), validate(z.object({ query: paginationQuery.passthrough() })), getAllUsers)
 router.get('/activity', requireRole('admin'), validate(z.object({ query: activityQuery })), getUserActivity)

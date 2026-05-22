@@ -1,6 +1,7 @@
 const Project = require('../models/Project')
 const { createNotification } = require('./notificationController')
 const { applyUserStats, POINTS } = require('../utils/points')
+const { updateLifecycleStage } = require('../utils/ventureLifecycle')
 
 const RATING_KEYS = [
   'problemClarity',
@@ -31,6 +32,11 @@ const VERDICT_OPTIONS = ['pass', 'rework', 'hold']
 
 const roundScore = (value) => Math.round(value * 100) / 100
 const average = (values) => values.reduce((sum, value) => sum + value, 0) / values.length
+const toReadinessScore = (value, fallback = 0) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return Math.max(0, Math.min(100, Math.round(fallback)))
+  return Math.max(0, Math.min(100, Math.round(numeric)))
+}
 
 const parseScore = (value) => {
   const numeric = Number(value)
@@ -166,13 +172,14 @@ exports.listValidations = async (req, res) => {
     const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20))
     const parsedPage = Math.max(1, parseInt(page, 10) || 1)
 
-    const projects = await Project.find({ status: 'validation' })
+    const filter = { 'validation.validationStatus': 'in_review' }
+    const projects = await Project.find(filter)
       .populate('owner', 'name')
       .sort({ updatedAt: -1 })
       .limit(parsedLimit)
       .skip((parsedPage - 1) * parsedLimit)
 
-    const total = await Project.countDocuments({ status: 'validation' })
+    const total = await Project.countDocuments(filter)
 
     res.json({
       projects,
@@ -185,7 +192,7 @@ exports.listValidations = async (req, res) => {
     })
   } catch (error) {
     console.error('List validations error:', error)
-    res.status(500).json({ message: 'Failed to fetch validation projects' })
+    res.status(500).json({ message: 'Failed to fetch validation ventures' })
   }
 }
 
@@ -239,21 +246,21 @@ exports.submitValidation = async (req, res) => {
 
     const project = await Project.findById(projectId)
     if (!project) {
-      return res.status(404).json({ message: 'Project not found' })
+      return res.status(404).json({ message: 'Venture not found' })
     }
 
-    if (project.status !== 'validation') {
-      return res.status(400).json({ message: 'Project is not in validation' })
+    if (project.validation?.validationStatus !== 'in_review') {
+      return res.status(400).json({ message: 'Venture is not in validation' })
     }
 
     const reviewerIdString = reviewerId.toString()
     if (project.owner?.toString() === reviewerIdString) {
-      return res.status(400).json({ message: 'Owners cannot review their own project' })
+      return res.status(400).json({ message: 'Owners cannot review their own venture' })
     }
 
     const teamIds = (project.teamMembers || []).map((id) => id.toString())
     if (teamIds.includes(reviewerIdString)) {
-      return res.status(400).json({ message: 'Team members cannot review their own project' })
+      return res.status(400).json({ message: 'Team contributors cannot review their own venture' })
     }
 
     if (!project.validation) {
@@ -357,7 +364,22 @@ exports.submitValidation = async (req, res) => {
         project.validation.validatedAt = new Date()
         project.validation.featuredAt = new Date()
         project.validation.lastFailureReason = undefined
-        project.status = 'validated'
+        updateLifecycleStage(project, 'incubation_ready')
+        project.momentumStatus = 'preparing_launch'
+        project.teamCheckIn = {
+          status: 'preparing_launch',
+          note: 'Validation passed. Venture is now incubation-ready.',
+          updatedAt: new Date(),
+          updatedBy: reviewerId
+        }
+        project.readinessScore = toReadinessScore(
+          Math.max(
+            Number(project.readinessScore || 0),
+            Number(project.validation.averageRating || 0) * 20,
+            85
+          ),
+          project.readinessScore
+        )
         if (!project.validation.completionAwarded) {
           awardCompletionPoints = true
           project.validation.completionAwarded = true
@@ -366,7 +388,8 @@ exports.submitValidation = async (req, res) => {
         project.validation.validationStatus = 'failed'
         project.validation.validatedAt = undefined
         project.validation.featuredAt = undefined
-        project.status = 'validation_failed'
+        updateLifecycleStage(project, 'pivoted')
+        project.momentumStatus = 'facing_blockers'
         project.validation.lastFailureReason = buildFailureSummary({
           averageRating: project.validation.averageRating,
           criteriaAverages,
@@ -374,6 +397,16 @@ exports.submitValidation = async (req, res) => {
           signalBreakdown,
           reviewsRequired: newReviewCount
         })
+        project.teamCheckIn = {
+          status: 'facing_blockers',
+          note: 'Validation failed. Rework core gaps and resubmit.',
+          updatedAt: new Date(),
+          updatedBy: reviewerId
+        }
+        project.readinessScore = toReadinessScore(
+          Math.min(Number(project.readinessScore || 0), 55),
+          project.readinessScore
+        )
       }
     }
 
@@ -395,7 +428,7 @@ exports.submitValidation = async (req, res) => {
       project.owner,
       'validation_feedback',
       'New validation feedback',
-      `Your project ${project.title} received new scorecard feedback.`,
+      `Your venture ${project.title} received new scorecard feedback.`,
       project._id,
       reviewerId,
       false,
@@ -406,8 +439,8 @@ exports.submitValidation = async (req, res) => {
       await createNotification(
         project.owner,
         'project_featured',
-        'Project validated',
-        `${project.title} has passed validation and is now validated.`,
+        'Venture validated',
+        `${project.title} has passed validation and is now incubation-ready.`,
         project._id,
         reviewerId,
         false,
@@ -433,6 +466,9 @@ exports.submitValidation = async (req, res) => {
       projectId: project._id,
       currentReviews: project.validation.currentReviews,
       averageRating: project.validation.averageRating,
+      readinessScore: project.readinessScore,
+      lifecycleStage: project.lifecycleStage,
+      momentumStatus: project.momentumStatus,
       criteriaAverages: project.validation.criteriaAverages,
       dimensionAverages: project.validation.dimensionAverages,
       signalBreakdown: project.validation.signalBreakdown,

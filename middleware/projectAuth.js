@@ -11,11 +11,11 @@ const requireProjectOwner = async (req, res, next) => {
 
   const project = await Project.findById(id)
   if (!project) {
-    return res.status(404).json({ message: 'Project not found' })
+    return res.status(404).json({ message: 'Venture not found' })
   }
 
   if (toId(project.owner) !== toId(userId)) {
-    return res.status(403).json({ message: 'Only the project owner can perform this action' })
+    return res.status(403).json({ message: 'Only the venture owner can perform this action' })
   }
 
   req.project = project
@@ -31,14 +31,14 @@ const requireTeamMember = async (req, res, next) => {
 
   const project = await Project.findById(id)
   if (!project) {
-    return res.status(404).json({ message: 'Project not found' })
+    return res.status(404).json({ message: 'Venture not found' })
   }
 
   const userIdString = toId(userId)
   const isOwner = toId(project.owner) === userIdString
   const isTeam = (project.teamMembers || []).some((member) => toId(member) === userIdString)
   if (!isOwner && !isTeam) {
-    return res.status(403).json({ message: 'Only team members can perform this action' })
+    return res.status(403).json({ message: 'Only team contributors can perform this action' })
   }
 
   req.project = project

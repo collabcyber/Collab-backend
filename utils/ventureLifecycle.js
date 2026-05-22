@@ -1,0 +1,202 @@
+const VENTURE_LIFECYCLE = [
+  'idea',
+  'validation',
+  'team_formation',
+  'prototype',
+  'mvp',
+  'growth',
+  'incubation_ready',
+  'pivoted',
+  'archived'
+]
+
+const LIFECYCLE_LABELS = {
+  idea: 'Idea',
+  validation: 'Validation',
+  team_formation: 'Team Formation',
+  prototype: 'Prototype',
+  mvp: 'MVP',
+  growth: 'Growth',
+  incubation_ready: 'Incubation Ready',
+  pivoted: 'Pivoted',
+  archived: 'Archived'
+}
+
+const LIFECYCLE_INDEX = VENTURE_LIFECYCLE.reduce((acc, stage, index) => {
+  acc[stage] = index
+  return acc
+}, {})
+
+const LINEAR_LIFECYCLE = [
+  'idea',
+  'validation',
+  'team_formation',
+  'prototype',
+  'mvp',
+  'growth',
+  'incubation_ready'
+]
+
+const LIFECYCLE_TRANSITIONS = {
+  idea: new Set(['validation', 'pivoted', 'archived']),
+  validation: new Set(['team_formation', 'pivoted', 'archived']),
+  team_formation: new Set(['prototype', 'pivoted', 'archived']),
+  prototype: new Set(['mvp', 'validation', 'pivoted', 'archived']),
+  mvp: new Set(['growth', 'incubation_ready', 'validation', 'pivoted', 'archived']),
+  growth: new Set(['incubation_ready', 'pivoted', 'archived']),
+  incubation_ready: new Set(['growth', 'pivoted', 'archived']),
+  pivoted: new Set(['validation', 'team_formation', 'prototype', 'mvp', 'growth', 'archived']),
+  archived: new Set([])
+}
+
+const LEGACY_STATUS_MAP = {
+  planning: 'idea',
+  building: 'prototype',
+  completed: 'mvp',
+  validation: 'mvp',
+  validated: 'incubation_ready',
+  validation_failed: 'pivoted',
+  archived: 'archived'
+}
+
+const LEGACY_PHASE_MAP = {
+  problem: 'idea',
+  plan: 'validation',
+  build: 'prototype',
+  mvp: 'mvp',
+  validation: 'mvp',
+  demo: 'growth'
+}
+
+const VALID_LIFECYCLE = new Set(VENTURE_LIFECYCLE)
+
+const toId = (value) => (value ? value.toString() : '')
+
+const normalizeLifecycleStage = (value, fallback = 'idea') => {
+  if (typeof value !== 'string') return fallback
+  const normalized = value.trim().toLowerCase()
+  return VALID_LIFECYCLE.has(normalized) ? normalized : fallback
+}
+
+const normalizeLifecycleFilter = (value, fallback = 'idea') => {
+  if (typeof value !== 'string') return fallback
+  const normalized = value.trim().toLowerCase()
+  if (VALID_LIFECYCLE.has(normalized)) return normalized
+  return LEGACY_STATUS_MAP[normalized] || LEGACY_PHASE_MAP[normalized] || fallback
+}
+
+const getLifecycleLabel = (stage) => LIFECYCLE_LABELS[normalizeLifecycleStage(stage)] || 'Idea'
+
+const getLifecycleProgress = (stage) => {
+  const normalized = normalizeLifecycleStage(stage)
+  if (normalized === 'pivoted') return 35
+  if (normalized === 'archived') return 100
+  const index = LINEAR_LIFECYCLE.indexOf(normalized)
+  if (index < 0) return 0
+  return Math.round(((index + 1) / LINEAR_LIFECYCLE.length) * 100)
+}
+
+const getNextLifecycleStage = (stage) => {
+  const normalized = normalizeLifecycleStage(stage)
+  if (normalized === 'pivoted') return 'validation'
+  if (normalized === 'archived' || normalized === 'incubation_ready') return null
+  const index = LINEAR_LIFECYCLE.indexOf(normalized)
+  if (index < 0 || index >= LINEAR_LIFECYCLE.length - 1) return null
+  return LINEAR_LIFECYCLE[index + 1]
+}
+
+const countProjectContributors = (project = {}) => {
+  const ids = new Set()
+  const ownerId = toId(project.owner?._id || project.owner)
+  if (ownerId) ids.add(ownerId)
+  ;(project.teamMembers || []).forEach((member) => {
+    const normalized = toId(member?._id || member)
+    if (normalized) ids.add(normalized)
+  })
+  return ids.size
+}
+
+const hasValidationWorkspaceData = (project = {}) => {
+  const workspace = project.validation?.workspace || {}
+  return Boolean(
+    (workspace.problemStatement || '').trim()
+    || (workspace.targetUsers || '').trim()
+    || (workspace.coreAssumptions || []).length
+    || (workspace.tasks || []).length
+    || (workspace.evidence || []).length
+    || Number(workspace.confidenceScore || 0) > 0
+  )
+}
+
+const inferLifecycleStage = (project = {}) => {
+  const explicitStage = normalizeLifecycleStage(project.lifecycleStage || '', '')
+  if (explicitStage) return explicitStage
+
+  const validationStatus = normalizeLifecycleStage(project.validation?.validationStatus || '', '')
+  if (validationStatus === 'archived') return 'archived'
+
+  const legacyStatus = typeof project.status === 'string' ? project.status.trim().toLowerCase() : ''
+  const legacyPhase = typeof project.phase === 'string' ? project.phase.trim().toLowerCase() : ''
+  const contributorCount = countProjectContributors(project)
+  const targetTeamSize = Math.max(1, Number(project.numberOfTeammates || 1))
+  const hasFullTeam = contributorCount >= targetTeamSize
+
+  if (legacyStatus === 'archived') return 'archived'
+  if (project.validation?.validationStatus === 'passed' || legacyStatus === 'validated') return 'incubation_ready'
+  if (project.validation?.validationStatus === 'failed' || legacyStatus === 'validation_failed') return 'pivoted'
+  if (legacyStatus === 'validation') return 'mvp'
+  if (legacyPhase === 'demo') return 'growth'
+  if (legacyPhase === 'mvp') return 'mvp'
+  if (legacyStatus === 'building' || legacyPhase === 'build') {
+    return hasFullTeam ? 'prototype' : 'team_formation'
+  }
+  if (legacyPhase === 'plan') return 'validation'
+  if (hasValidationWorkspaceData(project)) return 'validation'
+  if ((project.interestedUsers || []).length > 0 || contributorCount > 1) return 'team_formation'
+  return LEGACY_STATUS_MAP[legacyStatus] || LEGACY_PHASE_MAP[legacyPhase] || 'idea'
+}
+
+const canTransitionLifecycle = (fromStage, toStage) => {
+  const from = normalizeLifecycleStage(fromStage)
+  const to = normalizeLifecycleStage(toStage)
+  if (from === to) return true
+  return LIFECYCLE_TRANSITIONS[from]?.has(to) || false
+}
+
+const assertLifecycleTransition = (fromStage, toStage) => {
+  const from = normalizeLifecycleStage(fromStage)
+  const to = normalizeLifecycleStage(toStage)
+  if (canTransitionLifecycle(from, to)) {
+    return { ok: true, from, to }
+  }
+  return {
+    ok: false,
+    from,
+    to,
+    message: `Invalid lifecycle transition from ${getLifecycleLabel(from)} to ${getLifecycleLabel(to)}`
+  }
+}
+
+const updateLifecycleStage = (project, nextStage) => {
+  if (!project) return 'idea'
+  const normalized = normalizeLifecycleStage(nextStage)
+  project.lifecycleStage = normalized
+  return normalized
+}
+
+module.exports = {
+  VENTURE_LIFECYCLE,
+  LINEAR_LIFECYCLE,
+  LIFECYCLE_LABELS,
+  LIFECYCLE_INDEX,
+  LIFECYCLE_TRANSITIONS,
+  normalizeLifecycleStage,
+  normalizeLifecycleFilter,
+  getLifecycleLabel,
+  getLifecycleProgress,
+  getNextLifecycleStage,
+  inferLifecycleStage,
+  canTransitionLifecycle,
+  assertLifecycleTransition,
+  updateLifecycleStage
+}

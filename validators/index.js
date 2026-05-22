@@ -10,6 +10,7 @@ const text = z.string().min(1).max(1000)
 const shortText = z.string().min(1).max(200)
 const optionalText = z.string().max(2000).optional()
 const optionalString = z.string().optional()
+const optionalStringList = z.union([z.array(z.string()), z.string()]).optional()
 const numericScore = z.union([z.number(), z.string()])
 const emptyBody = z.object({}).strict()
 const optionalObjectIdOrAll = z.string().optional().refine(
@@ -25,11 +26,13 @@ const projectsQuery = z.object({
   category: optionalString,
   skills: optionalString,
   roles: optionalString,
+  lifecycleStage: optionalString,
   status: optionalString,
   page: z.string().optional(),
   limit: z.string().optional()
 }).passthrough()
 const userProjectsQuery = z.object({
+  lifecycleStage: optionalString,
   status: optionalString,
   page: z.string().optional(),
   limit: z.string().optional()
@@ -55,9 +58,13 @@ const registerBody = z.object({
   collegeType: optionalString,
   course: optionalString,
   yearOfStudy: optionalString,
-  skills: z.union([z.array(z.string()), z.string()]).optional(),
+  skills: optionalStringList,
   primaryCategory: optionalString,
-  phone: optionalString
+  phone: optionalString,
+  userGoal: optionalString,
+  executionRoles: optionalStringList,
+  industryInterests: optionalStringList,
+  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const loginBody = z.object({
@@ -113,10 +120,14 @@ const updateProfileBody = z.object({
   name: optionalString,
   course: optionalString,
   yearOfStudy: optionalString,
-  skills: z.union([z.array(z.string()), z.string()]).optional(),
+  skills: optionalStringList,
   primaryCategory: optionalString,
   phone: optionalString,
-  showContactToTeam: z.union([z.boolean(), z.string()]).optional()
+  showContactToTeam: z.union([z.boolean(), z.string()]).optional(),
+  userGoal: optionalString,
+  executionRoles: optionalStringList,
+  industryInterests: optionalStringList,
+  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const changePasswordBody = z.object({
@@ -249,10 +260,14 @@ const adminCreateUserBody = z.object({
   emailVerified: z.union([z.boolean(), z.string()]).optional(),
   course: optionalString,
   yearOfStudy: optionalString,
-  skills: z.union([z.array(z.string()), z.string()]).optional(),
+  skills: optionalStringList,
   primaryCategory: optionalString,
   phone: optionalString,
-  showContactToTeam: z.union([z.boolean(), z.string()]).optional()
+  showContactToTeam: z.union([z.boolean(), z.string()]).optional(),
+  userGoal: optionalString,
+  executionRoles: optionalStringList,
+  industryInterests: optionalStringList,
+  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const adminUpdateUserBody = z.object({
@@ -262,10 +277,14 @@ const adminUpdateUserBody = z.object({
   points: z.union([z.number(), z.string()]).optional(),
   course: optionalString,
   yearOfStudy: optionalString,
-  skills: z.union([z.array(z.string()), z.string()]).optional(),
+  skills: optionalStringList,
   primaryCategory: optionalString,
   phone: optionalString,
-  showContactToTeam: z.union([z.boolean(), z.string()]).optional()
+  showContactToTeam: z.union([z.boolean(), z.string()]).optional(),
+  userGoal: optionalString,
+  executionRoles: optionalStringList,
+  industryInterests: optionalStringList,
+  commitmentLevel: z.enum(['Exploring', 'Casual Contributor', 'Serious Builder', 'Startup Founder']).optional()
 }).passthrough()
 
 const sprintApplyBody = z.object({}).strict()
@@ -276,12 +295,37 @@ const sprintStatusUpdateBody = z.object({
 
 const checkpointPhase = z.enum(['problem', 'plan', 'build', 'mvp', 'validation', 'demo'])
 
+const checkpointReflection = z.object({
+  questionKey: z.string().min(1).max(120),
+  question: z.string().min(1).max(240),
+  answer: z.string().min(1).max(2000)
+}).passthrough()
+
+const checkpointExecutionEntry = z.object({
+  progressNarrative: z.string().max(2500).optional(),
+  nextMilestone: z.string().max(300).optional(),
+  blockers: z.union([z.array(z.string().max(240)), z.string()]).optional(),
+  evidenceLinks: z.union([z.array(z.string().url()), z.string().url()]).optional(),
+  reflections: z.array(checkpointReflection).min(1).max(20)
+}).passthrough()
+
 const checkpointSubmitBody = z.object({
   projectId: objectId,
   phase: checkpointPhase,
-  submissionLink: z.string().url(),
+  executionEntry: checkpointExecutionEntry.optional(),
+  submissionLink: z.string().url().optional(),
   description: z.string().max(2000).optional()
-}).passthrough()
+}).passthrough().refine(
+  (value) => {
+    const hasExecutionEntry = Boolean(value?.executionEntry?.reflections?.length)
+    const hasLegacySubmission = Boolean(value?.submissionLink)
+    return hasExecutionEntry || hasLegacySubmission
+  },
+  {
+    message: 'Checkpoint submission requires structured execution inputs',
+    path: ['executionEntry']
+  }
+)
 
 const checkpointProjectParams = z.object({
   projectId: objectId
@@ -293,8 +337,83 @@ const checkpointUpdateParams = z.object({
 })
 
 const checkpointUpdateBody = z.object({
-  submissionLink: z.string().url(),
+  executionEntry: checkpointExecutionEntry.optional(),
+  submissionLink: z.string().url().optional(),
   description: z.string().max(2000).optional()
+}).passthrough().refine(
+  (value) => Boolean(value?.executionEntry?.reflections?.length || value?.submissionLink),
+  {
+    message: 'Checkpoint update requires structured execution inputs',
+    path: ['executionEntry']
+  }
+)
+
+const milestoneCreateBody = z.object({
+  title: z.string().min(1).max(180),
+  description: z.string().max(4000).optional(),
+  owner: optionalId,
+  lifecycleStage: optionalString,
+  dueDate: z.string().optional(),
+  dependencies: optionalStringList,
+  blockers: optionalStringList,
+  blockerDetails: z.array(z.object({
+    blockerId: optionalString,
+    type: z.enum(['technical', 'design', 'validation', 'contributor']).optional(),
+    description: z.string().min(1).max(500),
+    status: z.enum(['open', 'resolved']).optional(),
+    resolvedAt: optionalString
+  }).passthrough()).optional(),
+  status: z.enum(['pending', 'in_progress', 'completed', 'blocked']).optional(),
+  priority: z.enum(['low', 'medium', 'high']).optional()
+}).passthrough()
+
+const milestoneUpdateBody = z.object({
+  title: z.string().min(1).max(180).optional(),
+  description: z.string().max(4000).optional(),
+  owner: optionalId,
+  lifecycleStage: optionalString,
+  dueDate: z.string().optional(),
+  dependencies: optionalStringList,
+  blockers: optionalStringList,
+  blockerDetails: z.array(z.object({
+    blockerId: optionalString,
+    type: z.enum(['technical', 'design', 'validation', 'contributor']).optional(),
+    description: z.string().min(1).max(500),
+    status: z.enum(['open', 'resolved']).optional(),
+    resolvedAt: optionalString
+  }).passthrough()).optional(),
+  status: z.enum(['pending', 'in_progress', 'completed', 'blocked']).optional(),
+  priority: z.enum(['low', 'medium', 'high']).optional()
+}).passthrough()
+
+const milestoneParams = z.object({
+  id: objectId,
+  milestoneId: objectId
+})
+
+const contributionCreateBody = z.object({
+  action: z.string().min(1).max(200),
+  impact: z.string().max(1000).optional(),
+  milestoneId: optionalId
+}).passthrough()
+
+const checkInBody = z.object({
+  status: z.enum(['strong_momentum', 'facing_blockers', 'need_contributors', 'pivoting', 'preparing_launch']),
+  note: z.string().max(500).optional()
+}).passthrough()
+
+const continuationBody = z.object({
+  action: z.enum([
+    'continue_building',
+    'prepare_incubation',
+    'recruit_contributors',
+    'pivot_venture',
+    'relaunch_validation',
+    'extend_mvp',
+    'launch_beta',
+    'archive_venture'
+  ]),
+  note: z.string().max(800).optional()
 }).passthrough()
 
 module.exports = {
@@ -348,5 +467,17 @@ module.exports = {
     checkpointProjectParams,
     checkpointUpdateParams,
     checkpointUpdateBody
+  },
+  milestone: {
+    milestoneCreateBody,
+    milestoneUpdateBody,
+    milestoneParams
+  },
+  contribution: {
+    contributionCreateBody
+  },
+  checkIn: {
+    checkInBody,
+    continuationBody
   }
 }
