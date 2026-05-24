@@ -42,7 +42,7 @@ const getOwnerEmail = () => process.env.OWNER_EMAIL?.toLowerCase().trim()
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const getFrontendBaseUrl = () => {
-  const base = process.env.FRONTEND_URL || 'https://collab-frontend-five.vercel.app'
+  const base = process.env.FRONTEND_URL || 'https://collab.qzz.io'
   return base.replace(/\/$/, '')
 }
 
@@ -200,7 +200,13 @@ exports.register = async (req, res) => {
             html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in ${OTP_EXPIRY_MINUTES} minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
           })
         } catch (mailError) {
-          return res.status(500).json({ message: 'Failed to resend verification email. Please try again.' })
+          console.error('Verification email resend failed:', mailError.message)
+          return res.status(200).json({
+            message: 'Account exists and verification is still required, but email delivery failed. Please try resend OTP again shortly.',
+            email: existingUser.email,
+            requiresVerification: true,
+            emailDeliveryFailed: true
+          })
         }
 
         return res.status(200).json({
@@ -297,8 +303,13 @@ exports.register = async (req, res) => {
         html: `<p>Your email verification OTP is <strong>${otp}</strong>.</p><p>It expires in ${OTP_EXPIRY_MINUTES} minutes.</p><p>Verify here: <a href="${verifyLink}">${verifyLink}</a></p>`
       })
     } catch (mailError) {
-      await User.deleteOne({ _id: user._id })
-      return res.status(500).json({ message: 'Failed to send verification email. Please try again.' })
+      console.error('Verification email send failed:', mailError.message)
+      return res.status(201).json({
+        message: 'Account created. Verification is required, but email delivery failed. Please try resend OTP from the verification screen.',
+        email: user.email,
+        requiresVerification: true,
+        emailDeliveryFailed: true
+      })
     }
 
     res.status(201).json({
