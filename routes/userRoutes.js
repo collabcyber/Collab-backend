@@ -11,6 +11,7 @@ const {
   getUserActivity,
   getAdminStats,
   getUserById,
+  lookupUserById,
   createUserByAdmin,
   updateUserByAdmin,
   deleteUserByAdmin
@@ -27,6 +28,7 @@ router.get('/projects', validate(z.object({ query: userProjectsQuery })), getUse
 router.get('/all', requireRole('admin'), validate(z.object({ query: paginationQuery.passthrough() })), getAllUsers)
 router.get('/activity', requireRole('admin'), validate(z.object({ query: activityQuery })), getUserActivity)
 router.get('/admin-stats', requireRole('admin'), validate(emptyBody), getAdminStats)
+router.get('/lookup/:id', validate(z.object({ params: z.object({ id: objectId }) })), lookupUserById)
 router.get('/:id', requireRole('admin'), validate(z.object({ params: z.object({ id: objectId }) })), getUserById)
 router.post('/', requireRole('admin'), validate(user.adminCreateUserBody), createUserByAdmin)
 router.patch('/:id', requireRole('admin'), validate(z.object({ params: z.object({ id: objectId }), body: user.adminUpdateUserBody })), updateUserByAdmin)

@@ -942,6 +942,11 @@ exports.addTeamMember = async (req, res) => {
       return res.status(400).json({ message: 'User already on team' })
     }
 
+    const teammate = await User.findById(userId).select('_id')
+    if (!teammate) {
+      return res.status(404).json({ message: 'User ID not found' })
+    }
+
     project.teamMembers.push(userId)
     project.interestedUsers = project.interestedUsers.filter((uid) => uid.toString() !== userId.toString())
 

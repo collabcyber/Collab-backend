@@ -394,6 +394,32 @@ exports.getUserById = async (req, res) => {
   }
 }
 
+exports.lookupUserById = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id)
+      .select('name email primaryCategory skills course yearOfStudy')
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' })
+    }
+
+    res.json({
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        primaryCategory: user.primaryCategory,
+        skills: user.skills || [],
+        course: user.course,
+        yearOfStudy: user.yearOfStudy
+      }
+    })
+  } catch (error) {
+    console.error('Lookup user by id error:', error)
+    res.status(500).json({ message: 'Failed to lookup user' })
+  }
+}
+
 exports.createUserByAdmin = async (req, res) => {
   try {
     if (req.user?.role !== 'admin') {
