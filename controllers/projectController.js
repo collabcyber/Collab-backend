@@ -556,6 +556,51 @@ const sanitizeProjectForViewer = (projectDoc, viewerId) => {
   return project
 }
 
+const OWNER_DISCOVER_SELECT =
+  'name email phone primaryCategory showContactToTeam executionProfile.commitmentLevel executionProfile.roles'
+
+const buildFounderRoleLabel = (ownerDoc = {}) => {
+  if (ownerDoc.executionProfile?.commitmentLevel) {
+    return ownerDoc.executionProfile.commitmentLevel
+  }
+  const roles = ownerDoc.executionProfile?.roles
+  if (Array.isArray(roles) && roles.length > 0) {
+    return roles[0]
+  }
+  if (ownerDoc.primaryCategory) {
+    return `${ownerDoc.primaryCategory} · Founder`
+  }
+  return 'Startup Founder'
+}
+
+const sanitizeProjectForDiscover = (projectDoc, viewerId) => {
+  const project = sanitizeProjectForViewer(projectDoc, viewerId)
+  if (!project) return project
+
+  const raw = projectDoc.toObject ? projectDoc.toObject({ virtuals: true }) : projectDoc
+  const ownerRaw = raw.owner
+  if (!ownerRaw || !project.owner) return project
+
+  const ownerId = toId(ownerRaw._id || ownerRaw)
+  const isOwner = viewerId && ownerId === viewerId
+  const canShowContact = Boolean(ownerRaw.showContactToTeam) || isOwner
+  const email = canShowContact && ownerRaw.email ? ownerRaw.email : undefined
+  const phone = canShowContact && ownerRaw.phone ? ownerRaw.phone : undefined
+
+  project.owner = {
+    _id: project.owner._id || ownerId,
+    name: ownerRaw.name || project.owner.name || 'Founder',
+    founderRole: buildFounderRoleLabel(ownerRaw),
+    primaryCategory: ownerRaw.primaryCategory || '',
+    email,
+    phone,
+    showContactToTeam: Boolean(ownerRaw.showContactToTeam),
+    contactAvailable: Boolean(email || phone)
+  }
+
+  return project
+}
+
 const maybeApplyInactivityPenalty = async (project) => {
   if (!project?.buildPhase?.isActive) return
 
@@ -763,7 +808,7 @@ exports.getProjects = async (req, res) => {
     let projects
     try {
       projects = await Project.find(filter)
-        .populate('owner', 'name')
+        .populate('owner', OWNER_DISCOVER_SELECT)
         .populate('college', 'name type')
         .sort({ createdAt: -1 })
         .limit(parsedLimit)
@@ -772,7 +817,7 @@ exports.getProjects = async (req, res) => {
       if (populateError?.name === 'CastError' && populateError?.path === 'college') {
         console.warn('Venture college populate failed, falling back without college populate.')
         projects = await Project.find(filter)
-          .populate('owner', 'name')
+          .populate('owner', OWNER_DISCOVER_SELECT)
           .sort({ createdAt: -1 })
           .limit(parsedLimit)
           .skip((parsedPage - 1) * parsedLimit)
@@ -782,7 +827,7 @@ exports.getProjects = async (req, res) => {
     }
 
     const total = await Project.countDocuments(filter)
-    const sanitizedProjects = projects.map((project) => sanitizeProjectForViewer(project, viewerId))
+    const sanitizedProjects = projects.map((project) => sanitizeProjectForDiscover(project, viewerId))
 
     res.json({
       projects: sanitizedProjects,
